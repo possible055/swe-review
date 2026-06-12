@@ -1,0 +1,34 @@
+# Rust
+/target/
+**/target/
+
+# Build / distribution
+build/
+dist/
+*.tsbuildinfo
+
+# Dependencies / package managers
+node_modules/
+
+# IDE / editor / AI agent
+.vscode/
+.cursor/
+.claude/
+.codex/
+.kilocode/
+.kiro/
+.gemini/
+.agent/
+.augment/
+.junie/
+AGENTS.md
+CLAUDE.md
+
+# Logs / env
+*.log
+.env
+!.env.example
+
+# Project-specific
+.dev/
+.repos/
