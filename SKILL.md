@@ -2,7 +2,7 @@
 name: swe-review
 description: Run Devin/Windsurf Lifeguard or Quick Review over local Git changes.
 metadata:
-  short-description: Local Devin/Windsurf review
+  short-description: Local Devin review
 ---
 
 # SWE Review
@@ -33,8 +33,18 @@ Useful options:
 - `--base <ref>`: review the working tree against a base ref.
 - `--diff-file <file>`: review an existing unified diff file.
 - `--method <agent|smart|fast>`: choose the Lifeguard method.
-- `--transport <native|acp>`: choose direct Quick Review HTTP API or Devin ACP fallback.
-- `--devin-bin <path>`: choose the standalone Devin CLI for `--transport acp`.
-- `--model <value>`: override Quick Review model selection; native defaults to `swe-check` when the review catalog is empty.
-- `--api-key <key>`: authenticate Lifeguard or Quick Review without relying on stored CLI credentials.
+- `--model <value>`: override Quick Review model selection; by default Quick Review uses the first discovered review model.
+- `--api-key <key>`: authenticate Lifeguard or Quick Review without relying on `WINDSURF_API_KEY` or `swe-tools/config.json`.
 - `--json`: return a structured JSON report.
+
+To extract local Devin credentials or local Windsurf/Devin database credentials
+into `swe-tools/config.json`:
+
+```sh
+./bin/swe-review extract-key --save
+```
+
+Useful extract-key options:
+
+- `--show`: print the full key instead of a masked key.
+- `--db-path <path>`: read a specific `state.vscdb`.

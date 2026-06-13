@@ -1,22 +1,18 @@
 # swe-review
 
-`swe-review` is a command-line tool for reviewing local Git changes with
-Devin/Windsurf review capabilities.
+`swe-review` reviews local Git changes with Devin/Windsurf review features.
+Use it before committing, opening a pull request, or handing work to another
+agent.
 
-Use it when you want a second pass over code changes before committing,
-opening a pull request, or handing work to another agent.
+It reads your local diff and prints review feedback. It does not modify your
+files.
 
-## What It Does
+## Commands
 
-`swe-review` provides two review commands:
-
-| Command | Best for | Output |
+| Command | Use when you want | Output |
 | --- | --- | --- |
-| `review` | Focused bug finding | Structured findings rendered as Markdown |
-| `quick-review` | Broader code review feedback | Free-form review text |
-
-Both commands review local changes from a Git repository. They do not modify
-your files.
+| `review` | Focused bug finding | Structured findings as Markdown |
+| `quick-review` | Broader review feedback | Free-form review text |
 
 ## Setup
 
@@ -26,19 +22,18 @@ Build the CLI:
 cargo build --release
 ```
 
-Provide an API key with either a flag:
+If you already use Devin or Windsurf locally, save a usable key once:
 
 ```bash
+swe-review extract-key --save
+```
+
+You can also provide a key directly:
+
+```bash
+export WINDSURF_API_KEY="..."
 swe-review review --path . --api-key "$WINDSURF_API_KEY"
 ```
-
-or an environment variable:
-
-```bash
-export SWE_REVIEW_API_KEY="..."
-```
-
-`WINDSURF_API_KEY` is also accepted.
 
 ## Basic Usage
 
@@ -72,39 +67,31 @@ Review an existing diff file:
 swe-review review --path . --diff-file changes.diff
 ```
 
-Print JSON instead of Markdown/text:
+Print JSON:
 
 ```bash
 swe-review review --path . --json
 ```
 
-## Choosing A Review Mode
+## Review Options
 
-Use `review` when you want concise bug-oriented findings:
+Choose a Lifeguard review mode:
 
 ```bash
 swe-review review --path . --method agent
 ```
 
-Available methods are:
+Available modes:
 
 - `agent`
 - `smart`
 - `fast`
 
-Use `quick-review` when you want broader review commentary:
+Choose a Quick Review model:
 
 ```bash
-swe-review quick-review --path .
+swe-review quick-review --path . --model swe-check
 ```
-
-To request a specific Quick Review model:
-
-```bash
-swe-review quick-review --path . --model <model-value>
-```
-
-## Diff Selection
 
 Choose one diff source at a time:
 
@@ -117,9 +104,9 @@ swe-review review --path . --diff-file changes.diff
 
 If no diff source is selected, `swe-review` reviews the current working tree.
 
-## Size Limits
+## Large Diffs
 
-Large diffs can be limited before they are sent for review:
+Use limits when reviewing large repositories or generated-heavy changes:
 
 ```bash
 swe-review review --path . \
@@ -129,9 +116,23 @@ swe-review review --path . \
   --max-estimated-tokens 100000
 ```
 
-These limits help keep reviews predictable for large repositories.
+## Credentials
 
-## Notes
+Credential lookup order:
 
-- Credentials can be supplied by `--api-key`, `SWE_REVIEW_API_KEY`, or
-  `WINDSURF_API_KEY`.
+1. `--api-key`
+2. `WINDSURF_API_KEY`
+3. Saved key from `swe-review extract-key --save`
+4. Local Devin/Windsurf credentials
+
+To inspect the extracted key source without saving:
+
+```bash
+swe-review extract-key
+```
+
+To print the full key for shell setup:
+
+```bash
+swe-review extract-key --show
+```

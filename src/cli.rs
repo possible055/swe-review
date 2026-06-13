@@ -1,3 +1,4 @@
+use crate::credentials::{extract_key, mask_api_key, write_swe_tools_config_api_key};
 use crate::diff::DiffSource;
 use crate::lifeguard::{ReviewOptions, run_review};
 use crate::quick_review::{QuickReviewOptions, run_quick_review};
@@ -16,6 +17,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    #[command(about = "Extract Windsurf API key from local database")]
+    ExtractKey(ExtractKeyArgs),
     #[command(about = "Run a Lifeguard review over local changes")]
     Review(ReviewArgs),
     #[command(about = "Run Quick Review over local changes")]
@@ -29,7 +32,7 @@ struct ReviewArgs {
 
     #[arg(
         long,
-        help = "Windsurf or Devin API key. Defaults to SWE_REVIEW_API_KEY or WINDSURF_API_KEY."
+        help = "Windsurf API key. Defaults to WINDSURF_API_KEY or swe-tools/config.json."
     )]
     api_key: Option<String>,
 
@@ -107,13 +110,13 @@ struct QuickReviewArgs {
 
     #[arg(
         long,
-        help = "Model config value to use. Defaults to discovered SWE-check, or the free swe-check model when the native catalog is empty."
+        help = "Model config value to use. Defaults to the first discovered Quick Review model."
     )]
     model: Option<String>,
 
     #[arg(
         long,
-        help = "Devin/Windsurf API key. Defaults to SWE_REVIEW_API_KEY or WINDSURF_API_KEY when set."
+        help = "Windsurf API key. Defaults to WINDSURF_API_KEY or swe-tools/config.json."
     )]
     api_key: Option<String>,
 
@@ -176,9 +179,22 @@ struct QuickReviewArgs {
     json: bool,
 }
 
+#[derive(Debug, Args)]
+struct ExtractKeyArgs {
+    #[arg(long, help = "Path to Windsurf state.vscdb. Default is auto-detect.")]
+    db_path: Option<PathBuf>,
+
+    #[arg(long, help = "Save extracted key to swe-tools config.")]
+    save: bool,
+
+    #[arg(long, help = "Print the full key instead of a masked key.")]
+    show: bool,
+}
+
 pub fn run() -> i32 {
     let cli = Cli::parse();
     match cli.command {
+        Commands::ExtractKey(args) => run_extract_key(args),
         Commands::Review(args) => run_review_command(args),
         Commands::QuickReview(args) => run_quick_review_command(args),
     }
@@ -194,7 +210,7 @@ fn run_review_command(args: ReviewArgs) -> i32 {
     };
     let mut options = ReviewOptions::new(absolute_path(&args.path));
     options.source = source;
-    options.api_key = args.api_key.or_else(|| env::var("SWE_REVIEW_API_KEY").ok());
+    options.api_key = args.api_key;
     options.method = args.method;
     options.max_file_bytes = args.max_file_bytes;
     options.max_total_diff_bytes = args.max_total_diff_bytes;
@@ -246,6 +262,52 @@ fn run_review_command(args: ReviewArgs) -> i32 {
             1
         }
     }
+}
+
+fn run_extract_key(args: ExtractKeyArgs) -> i32 {
+    let result = extract_key(args.db_path.as_deref());
+    if let Some(error) = result.error {
+        eprintln!("Error: {error}");
+        if let Some(hint) = result.hint {
+            eprintln!("Hint: {hint}");
+        }
+        return 1;
+    }
+
+    let Some(key) = result.api_key else {
+        eprintln!("Error: apiKey field is empty");
+        return 1;
+    };
+
+    if args.save {
+        match write_swe_tools_config_api_key(&key) {
+            Ok(config_path) => eprintln!("Saved Windsurf API key to {}", config_path.display()),
+            Err(error) => {
+                eprintln!("Error: {error}");
+                return 1;
+            }
+        }
+    }
+
+    println!(
+        "Windsurf API Key: {}",
+        if args.show {
+            key.clone()
+        } else {
+            mask_api_key(&key)
+        }
+    );
+    if let Some(key_type) = result.key_type {
+        eprintln!("Key type: {key_type}");
+    }
+    eprintln!("{}: {}", result.source_label, result.db_path);
+
+    if args.show {
+        println!("\nRun the following command to set the env var:");
+        println!("  export WINDSURF_API_KEY=\"{key}\"");
+    }
+
+    0
 }
 
 fn run_quick_review_command(args: QuickReviewArgs) -> i32 {

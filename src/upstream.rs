@@ -132,8 +132,12 @@ pub struct NativeChatResponse {
 
 #[derive(Debug, Error)]
 pub enum NativeError {
-    #[error("Windsurf API key not found. Set SWE_REVIEW_API_KEY or WINDSURF_API_KEY.")]
+    #[error(
+        "Windsurf API key not found. Provide --api-key, set WINDSURF_API_KEY, add WINDSURF_API_KEY to swe-tools/config.json, or run `swe-review extract-key --save`."
+    )]
     ApiKeyMissing,
+    #[error("{0}")]
+    ApiKey(String),
     #[error("HTTP request failed: {0}")]
     Network(String),
     #[error("Server returned HTTP {status}: {body}")]
@@ -146,6 +150,10 @@ pub enum NativeError {
     ModeUnavailable(String),
     #[error("Malformed protobuf response: {0}")]
     Decode(&'static str),
+    #[error(
+        "The server rejected Quick Review chat streaming for the configured Windsurf session token. Re-running `swe-review extract-key --save` will save the same local session token unless Windsurf has refreshed it. Try a discovered model value, omit --model, or provide a standard Windsurf API key via --api-key, WINDSURF_API_KEY, or swe-tools/config.json."
+    )]
+    SessionTokenNotAllowed,
 }
 
 pub struct NativeClient {
@@ -162,8 +170,6 @@ impl NativeClient {
     pub fn new(options: NativeClientOptions) -> Result<Self, NativeError> {
         let api_key = options
             .api_key
-            .or_else(|| env::var("SWE_REVIEW_API_KEY").ok())
-            .or_else(|| env::var("WINDSURF_API_KEY").ok())
             .filter(|key| !key.trim().is_empty())
             .ok_or(NativeError::ApiKeyMissing)?;
         let (api_base, auth_base, seat_management_base) = endpoint_urls(options.endpoint);
@@ -440,8 +446,8 @@ fn encode_get_chat_message_request(
     encoder.write_varint(7, CHAT_REQUEST_TYPE_CASCADE);
     encoder.write_message(8, &encode_completion_configuration());
     encoder.write_string(16, cascade_id);
+    encoder.write_string(17, prompt_id);
     encoder.write_string(21, request.model_uid);
-    encoder.write_string(22, prompt_id);
     encoder.to_bytes()
 }
 
@@ -1063,11 +1069,12 @@ mod tests {
             field.number == 16 && field_string(field).as_deref() == Some("cascade-id")
         }));
         assert!(fields.iter().any(|field| {
-            field.number == 21 && field_string(field).as_deref() == Some("swe-check")
+            field.number == 17 && field_string(field).as_deref() == Some("prompt-id")
         }));
         assert!(fields.iter().any(|field| {
-            field.number == 22 && field_string(field).as_deref() == Some("prompt-id")
+            field.number == 21 && field_string(field).as_deref() == Some("swe-check")
         }));
+        assert!(!fields.iter().any(|field| field.number == 22));
     }
 
     #[test]

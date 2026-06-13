@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod credentials;
 pub mod diff;
 pub mod lifeguard;
 pub mod lifeguard_rules;

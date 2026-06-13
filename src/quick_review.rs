@@ -1,3 +1,4 @@
+use crate::credentials::resolve_api_key;
 use crate::diff::{DiffBudget, DiffSource, ReviewDiff, SkippedFile, build_quick_review_diff};
 use crate::upstream::{
     NativeChatRequest, NativeClient, NativeClientEndpoint, NativeClientOptions, NativeError,
@@ -5,12 +6,10 @@ use crate::upstream::{
 };
 use serde::Serialize;
 use std::collections::HashSet;
-use std::env;
 use std::path::PathBuf;
 use thiserror::Error;
 
 const QUICK_REVIEW_DIFF_URI: &str = "diff://workspace/changes";
-const DEFAULT_NATIVE_QUICK_REVIEW_MODEL: &str = "swe-check";
 const QUICK_REVIEW_PROMPT: &str = "Review these changes in detail. Look for:\n- Bugs, logic errors, and incorrect behavior\n- Security vulnerabilities or unsafe patterns\n- Performance issues and unnecessary complexity\n- Missing error handling or edge cases\n- Code style issues and violations of project conventions\n\nBe thorough and specific. For each issue found, explain the problem, its impact, and suggest a concrete fix. If the changes look correct, confirm that with a brief explanation of why.";
 
 #[derive(Debug, Clone)]
@@ -133,8 +132,13 @@ fn run_quick_review_native(
     let review_prompt = native_quick_review_prompt(&text);
 
     let (model, response) = runtime.block_on(async {
+        let api_key = resolve_api_key(options.api_key.clone()).map_err(|error| {
+            NativeError::ApiKey(format!("Unable to resolve Windsurf API key: {error}"))
+        })?;
+        let is_session_token = api_key.is_session_token;
+
         let mut client = NativeClient::new(NativeClientOptions {
-            api_key: quick_review_api_key(options.api_key),
+            api_key: Some(api_key.value),
             endpoint: NativeClientEndpoint::QuickReview,
             timeout_ms: options.timeout_ms,
         })?;
@@ -150,7 +154,14 @@ fn run_quick_review_native(
                 model_uid: &model.value,
                 prompt: &review_prompt,
             })
-            .await?;
+            .await
+            .map_err(|err| {
+                if is_session_token && err.to_string().contains("permission_denied") {
+                    QuickReviewError::Native(NativeError::SessionTokenNotAllowed)
+                } else {
+                    err.into()
+                }
+            })?;
         Ok::<_, QuickReviewError>((model, response))
     })?;
 
@@ -192,26 +203,15 @@ fn select_quick_review_model_from_candidates(
             .find(|model| model.value == explicit_model || model.name == explicit_model)
             .cloned()
             .unwrap_or_else(|| QuickReviewModel {
-                value: explicit_model.to_string(),
+                value: canonical_explicit_model_value(explicit_model),
                 name: explicit_model.to_string(),
                 description: None,
             }));
     }
 
     models
-        .iter()
-        .find(|model| is_swe_check_model(model))
+        .first()
         .cloned()
-        .or_else(|| {
-            models.is_empty().then(|| QuickReviewModel {
-                value: DEFAULT_NATIVE_QUICK_REVIEW_MODEL.to_string(),
-                name: "SWE-check".to_string(),
-                description: Some(
-                    "Default free Quick Review model used when the native catalog is empty."
-                        .to_string(),
-                ),
-            })
-        })
         .ok_or_else(|| QuickReviewError::ModelUnavailable(describe_quick_review_models(models)))
 }
 
@@ -232,24 +232,17 @@ fn describe_quick_review_models(models: &[QuickReviewModel]) -> String {
         .join(", ")
 }
 
-fn is_swe_check_model(model: &QuickReviewModel) -> bool {
-    let haystack = format!(
-        "{} {} {}",
-        model.name,
-        model.value,
-        model.description.as_deref().unwrap_or("")
-    )
-    .to_ascii_lowercase();
-    haystack.contains("swe-check")
-        || haystack.contains("swe check")
-        || haystack.contains("swecheck")
-}
-
-fn quick_review_api_key(explicit: Option<String>) -> Option<String> {
-    explicit
-        .or_else(|| env::var("SWE_REVIEW_API_KEY").ok())
-        .or_else(|| env::var("WINDSURF_API_KEY").ok())
-        .filter(|key| !key.trim().is_empty())
+fn canonical_explicit_model_value(model: &str) -> String {
+    let normalized = model
+        .chars()
+        .filter(|character| *character != '-' && *character != ' ')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if normalized == "swecheck" {
+        "swe-check".to_string()
+    } else {
+        model.to_string()
+    }
 }
 
 fn native_quick_review_prompt(diff: &str) -> String {
@@ -305,7 +298,7 @@ mod tests {
     }
 
     #[test]
-    fn selects_swe_check_from_native_candidates() {
+    fn selects_first_native_candidate() {
         let candidates = vec![
             QuickReviewModel {
                 value: "gpt-5-5-review".to_string(),
@@ -321,7 +314,7 @@ mod tests {
 
         let selected = select_quick_review_model_from_candidates(&candidates, None).unwrap();
 
-        assert_eq!(selected.value, "swe-check");
+        assert_eq!(selected.value, "gpt-5-5-review");
     }
 
     #[test]
@@ -331,14 +324,22 @@ mod tests {
 
         assert_eq!(selected.value, "manual-model");
         assert_eq!(selected.name, "manual-model");
+        assert_eq!(selected.description, None);
     }
 
     #[test]
-    fn native_candidates_fall_back_to_swe_check_when_catalog_is_empty() {
-        let selected = select_quick_review_model_from_candidates(&[], None).unwrap();
+    fn explicit_swe_check_display_name_uses_known_model_uid() {
+        let selected = select_quick_review_model_from_candidates(&[], Some("SWE-check")).unwrap();
 
         assert_eq!(selected.value, "swe-check");
         assert_eq!(selected.name, "SWE-check");
+    }
+
+    #[test]
+    fn native_candidates_error_when_catalog_is_empty() {
+        let error = select_quick_review_model_from_candidates(&[], None).unwrap_err();
+
+        assert!(error.to_string().contains("Available model options: none"));
     }
 
     #[test]

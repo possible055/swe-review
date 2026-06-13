@@ -1,3 +1,4 @@
+use crate::credentials::resolve_api_key;
 use crate::diff::{
     DiffBudget, DiffSource, ReviewDiff, SkippedFile, build_review_diff, git_context,
 };
@@ -101,8 +102,11 @@ pub async fn run_review(
         &format!("Loaded {} Lifeguard rule(s)", user_rules.len()),
     );
 
+    let api_key = resolve_api_key(options.api_key).map_err(|error| {
+        NativeError::ApiKey(format!("Unable to resolve Windsurf API key: {error}"))
+    })?;
     let mut client = NativeClient::new(NativeClientOptions {
-        api_key: options.api_key,
+        api_key: Some(api_key.value),
         endpoint: NativeClientEndpoint::Lifeguard,
         timeout_ms: options.timeout_ms,
     })?;
