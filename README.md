@@ -1,6 +1,6 @@
 # swe-review
 
-`swe-review` reviews local Git changes with Devin/Windsurf review features.
+`swe-review` reviews local Git changes with Devin/Windsurf Quick Review.
 Use it before committing, opening a pull request, or handing work to another
 agent.
 
@@ -11,8 +11,8 @@ files.
 
 | Command | Use when you want | Output |
 | --- | --- | --- |
-| `review` | Focused bug finding | Structured findings as Markdown |
 | `quick-review` | Broader review feedback | Free-form review text |
+| `extract-key` | Save or inspect local credentials | Masked or full key output |
 
 ## Setup
 
@@ -32,18 +32,12 @@ You can also provide a key directly:
 
 ```bash
 export WINDSURF_API_KEY="..."
-swe-review review --path . --api-key "$WINDSURF_API_KEY"
+swe-review quick-review --path . --api-key "$WINDSURF_API_KEY"
 ```
 
 ## Basic Usage
 
 Review current working tree changes:
-
-```bash
-swe-review review --path .
-```
-
-Run a broader Quick Review:
 
 ```bash
 swe-review quick-review --path .
@@ -52,40 +46,28 @@ swe-review quick-review --path .
 Review staged changes only:
 
 ```bash
-swe-review review --path . --staged
+swe-review quick-review --path . --staged
 ```
 
 Review changes against a base branch:
 
 ```bash
-swe-review review --path . --base main
+swe-review quick-review --path . --base main
 ```
 
 Review an existing diff file:
 
 ```bash
-swe-review review --path . --diff-file changes.diff
+swe-review quick-review --path . --diff-file changes.diff
 ```
 
 Print JSON:
 
 ```bash
-swe-review review --path . --json
+swe-review quick-review --path . --json
 ```
 
 ## Review Options
-
-Choose a Lifeguard review mode:
-
-```bash
-swe-review review --path . --method agent
-```
-
-Available modes:
-
-- `agent`
-- `smart`
-- `fast`
 
 Choose a Quick Review model:
 
@@ -96,10 +78,10 @@ swe-review quick-review --path . --model swe-check
 Choose one diff source at a time:
 
 ```bash
-swe-review review --path . --staged
-swe-review review --path . --unstaged
-swe-review review --path . --base main
-swe-review review --path . --diff-file changes.diff
+swe-review quick-review --path . --staged
+swe-review quick-review --path . --unstaged
+swe-review quick-review --path . --base main
+swe-review quick-review --path . --diff-file changes.diff
 ```
 
 If no diff source is selected, `swe-review` reviews the current working tree.
@@ -109,7 +91,7 @@ If no diff source is selected, `swe-review` reviews the current working tree.
 Use limits when reviewing large repositories or generated-heavy changes:
 
 ```bash
-swe-review review --path . \
+swe-review quick-review --path . \
   --max-file-bytes 1000000 \
   --max-total-diff-bytes 512000 \
   --max-total-diff-lines 12000 \

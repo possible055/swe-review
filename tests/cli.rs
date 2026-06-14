@@ -19,32 +19,15 @@ fn write_auth_db(path: &std::path::Path, key: &str) {
 }
 
 #[test]
-fn review_requires_path() {
+fn review_command_is_removed() {
     let output = Command::cargo_bin("swe-review")
         .unwrap()
-        .args(["review"])
+        .args(["review", "--help"])
         .output()
         .unwrap();
 
     assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("--path"));
-}
-
-#[test]
-fn review_rejects_conflicting_diff_sources() {
-    let tmp = TempDir::new().unwrap();
-    let output = Command::cargo_bin("swe-review")
-        .unwrap()
-        .args(["review", "--path"])
-        .arg(tmp.path())
-        .args(["--staged", "--base", "main"])
-        .output()
-        .unwrap();
-
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("mutually exclusive"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("review"));
 }
 
 #[test]
@@ -182,7 +165,6 @@ fn auth_command_is_removed() {
 fn cli_help_omits_legacy_credential_sources() {
     for args in [
         &["extract-key", "--help"][..],
-        &["review", "--help"][..],
         &["quick-review", "--help"][..],
     ] {
         let output = Command::cargo_bin("swe-review")
@@ -198,4 +180,18 @@ fn cli_help_omits_legacy_credential_sources() {
         assert!(!stdout.contains("auth extract-key"));
         assert!(!stdout.contains("import-devin"));
     }
+}
+
+#[test]
+fn top_level_help_omits_review_command() {
+    let output = Command::cargo_bin("swe-review")
+        .unwrap()
+        .args(["--help"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("quick-review"));
+    assert!(!stdout.contains("review [OPTIONS]"));
 }

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 const DEFAULT_MAX_FILE_BYTES: u64 = 1_000_000;
 
 #[derive(Debug, Clone)]
-pub struct ReviewCommonOptions {
+pub struct ReviewOptions {
     pub project_path: PathBuf,
     pub source: DiffSource,
     pub api_key: Option<String>,
@@ -15,7 +15,7 @@ pub struct ReviewCommonOptions {
     pub timeout_ms: u64,
 }
 
-impl ReviewCommonOptions {
+impl ReviewOptions {
     pub fn new(project_path: impl Into<PathBuf>) -> Self {
         let budget = DiffBudget::default();
         Self {

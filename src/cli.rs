@@ -1,8 +1,7 @@
 use crate::credentials::{extract_key, mask_api_key, write_swe_tools_config_api_key};
 use crate::diff::DiffSource;
-use crate::lifeguard::{ReviewOptions, run_review};
 use crate::quick_review::{QuickReviewOptions, run_quick_review};
-use crate::review_common::ReviewCommonOptions;
+use crate::review_options::ReviewOptions;
 use clap::{Args, Parser, Subcommand};
 use std::env;
 use std::io::Write;
@@ -20,30 +19,14 @@ struct Cli {
 enum Commands {
     #[command(about = "Extract Windsurf API key from local database")]
     ExtractKey(ExtractKeyArgs),
-    #[command(about = "Run a Lifeguard review over local changes")]
-    Review(ReviewArgs),
     #[command(about = "Run Quick Review over local changes")]
     QuickReview(QuickReviewArgs),
 }
 
 #[derive(Debug, Args)]
-struct ReviewArgs {
-    #[command(flatten)]
-    common: ReviewCommonArgs,
-
-    #[arg(
-        long,
-        default_value = "agent",
-        value_parser = ["agent", "smart", "fast"],
-        help = "Lifeguard method to run."
-    )]
-    method: String,
-}
-
-#[derive(Debug, Args)]
 struct QuickReviewArgs {
     #[command(flatten)]
-    common: ReviewCommonArgs,
+    review: ReviewArgs,
 
     #[arg(
         long,
@@ -53,7 +36,7 @@ struct QuickReviewArgs {
 }
 
 #[derive(Debug, Args)]
-struct ReviewCommonArgs {
+struct ReviewArgs {
     #[arg(long, help = "Absolute or relative path to the Git project root.")]
     path: PathBuf,
 
@@ -138,63 +121,7 @@ pub fn run() -> i32 {
     let cli = Cli::parse();
     match cli.command {
         Commands::ExtractKey(args) => run_extract_key(args),
-        Commands::Review(args) => run_review_command(args),
         Commands::QuickReview(args) => run_quick_review_command(args),
-    }
-}
-
-fn run_review_command(args: ReviewArgs) -> i32 {
-    let source = match review_source(&args.common) {
-        Ok(source) => source,
-        Err(message) => {
-            eprintln!("Error: {message}");
-            return 2;
-        }
-    };
-    let mut options = ReviewOptions::new(absolute_path(&args.common.path));
-    apply_common_options(&mut options.common, source, &args.common);
-    options.method = args.method;
-
-    let runtime = match crate::util::build_review_runtime() {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            eprintln!("Unexpected error: {error}");
-            return 1;
-        }
-    };
-    let progress = |message: &str| {
-        eprintln!("[swe-review] {message}");
-        let _ = std::io::stderr().flush();
-    };
-
-    match runtime.block_on(async { run_review(options, Some(&progress)).await }) {
-        Ok(report) if args.common.json => match serde_json::to_string_pretty(&report) {
-            Ok(text) => {
-                println!("{text}");
-                0
-            }
-            Err(error) => {
-                eprintln!("Unexpected error: {error}");
-                1
-            }
-        },
-        Ok(report) => {
-            if !report.skipped_files.is_empty() {
-                eprintln!(
-                    "[swe-review] Skipped {} file(s):",
-                    report.skipped_files.len()
-                );
-                for skipped in &report.skipped_files {
-                    eprintln!("[swe-review]   {}: {}", skipped.path, skipped.reason);
-                }
-            }
-            println!("{}", report.review);
-            0
-        }
-        Err(error) => {
-            eprintln!("Review failed: {error}");
-            1
-        }
     }
 }
 
@@ -245,15 +172,15 @@ fn run_extract_key(args: ExtractKeyArgs) -> i32 {
 }
 
 fn run_quick_review_command(args: QuickReviewArgs) -> i32 {
-    let source = match review_source(&args.common) {
+    let source = match diff_source_from_args(&args.review) {
         Ok(source) => source,
         Err(message) => {
             eprintln!("Error: {message}");
             return 2;
         }
     };
-    let mut options = QuickReviewOptions::new(absolute_path(&args.common.path));
-    apply_common_options(&mut options.common, source, &args.common);
+    let mut options = QuickReviewOptions::new(absolute_path(&args.review.path));
+    apply_review_options(&mut options.review, source, &args.review);
     options.model = args.model;
 
     let progress = |message: &str| {
@@ -262,7 +189,7 @@ fn run_quick_review_command(args: QuickReviewArgs) -> i32 {
     };
 
     match run_quick_review(options, Some(&progress)) {
-        Ok(report) if args.common.json => match serde_json::to_string_pretty(&report) {
+        Ok(report) if args.review.json => match serde_json::to_string_pretty(&report) {
             Ok(text) => {
                 println!("{text}");
                 0
@@ -282,9 +209,6 @@ fn run_quick_review_command(args: QuickReviewArgs) -> i32 {
                     eprintln!("[swe-review]   {}: {}", skipped.path, skipped.reason);
                 }
             }
-            if let Some(error) = &report.restore_error {
-                eprintln!("[swe-review] Quick Review: failed to restore model: {error}");
-            }
             println!("{}", report.review);
             0
         }
@@ -295,7 +219,7 @@ fn run_quick_review_command(args: QuickReviewArgs) -> i32 {
     }
 }
 
-fn review_source(args: &ReviewCommonArgs) -> Result<DiffSource, String> {
+fn diff_source_from_args(args: &ReviewArgs) -> Result<DiffSource, String> {
     diff_source(
         args.staged,
         args.unstaged,
@@ -334,11 +258,7 @@ fn diff_source(
     Ok(DiffSource::WorkingTree)
 }
 
-fn apply_common_options(
-    options: &mut ReviewCommonOptions,
-    source: DiffSource,
-    args: &ReviewCommonArgs,
-) {
+fn apply_review_options(options: &mut ReviewOptions, source: DiffSource, args: &ReviewArgs) {
     options.source = source;
     options.api_key = args.api_key.clone();
     options.max_file_bytes = args.max_file_bytes;
@@ -363,8 +283,8 @@ fn absolute_path(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
-    fn args() -> ReviewCommonArgs {
-        ReviewCommonArgs {
+    fn args() -> ReviewArgs {
+        ReviewArgs {
             path: PathBuf::from("."),
             api_key: None,
             staged: false,
@@ -381,18 +301,18 @@ mod tests {
     }
 
     #[test]
-    fn review_source_defaults_to_working_tree() {
+    fn diff_source_defaults_to_working_tree() {
         assert!(matches!(
-            review_source(&args()).unwrap(),
+            diff_source_from_args(&args()).unwrap(),
             DiffSource::WorkingTree
         ));
     }
 
     #[test]
-    fn review_source_rejects_multiple_sources() {
+    fn diff_source_rejects_multiple_sources() {
         let mut args = args();
         args.staged = true;
         args.base = Some("main".to_string());
-        assert!(review_source(&args).is_err());
+        assert!(diff_source_from_args(&args).is_err());
     }
 }

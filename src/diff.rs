@@ -33,15 +33,6 @@ struct FileSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct GitContext {
-    pub root: PathBuf,
-    pub repo_name: String,
-    pub commit_hash: String,
-    pub author_name: String,
-    pub commit_message: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ReviewDiff {
     pub text: String,
     pub files: Vec<ReviewFile>,
@@ -118,63 +109,6 @@ const EXCLUDE_PATHS: &[&str] = &[
     ":(exclude)venv/*",
 ];
 
-pub fn build_review_diff(
-    project_path: &Path,
-    source: &DiffSource,
-    max_file_bytes: u64,
-    budget: DiffBudget,
-) -> Result<ReviewDiff, DiffError> {
-    if let DiffSource::DiffFile(path) = source {
-        let bytes = fs::read(path).map_err(|err| DiffError::ReadFile {
-            path: path.display().to_string(),
-            message: err.to_string(),
-        })?;
-        let text = String::from_utf8(bytes)
-            .map_err(|_| DiffError::DiffFileUtf8(path.display().to_string()))?;
-        let line_count = count_lines(&text);
-        enforce_budget(&text, line_count, budget)?;
-        return Ok(ReviewDiff {
-            line_count,
-            text,
-            files: Vec::new(),
-            skipped_files: Vec::new(),
-        });
-    }
-
-    let root = git_root(project_path)?;
-    let paths = changed_paths(&root, source)?;
-    let mut diff_chunks = Vec::new();
-    let mut files = Vec::new();
-    let mut skipped_files = Vec::new();
-
-    for path in paths {
-        match snapshot_file(&root, &path, source, max_file_bytes) {
-            Ok(Some(snapshot)) => match diff_for_snapshot(&root, source, &snapshot) {
-                Ok(Some(text)) => {
-                    diff_chunks.push(text);
-                    files.push(ReviewFile {
-                        path: snapshot.path,
-                    });
-                }
-                Ok(None) => {}
-                Err(reason) => skipped_files.push(SkippedFile { path, reason }),
-            },
-            Ok(None) => {}
-            Err(reason) => skipped_files.push(SkippedFile { path, reason }),
-        }
-    }
-
-    let text = diff_chunks.join("\n");
-    let line_count = count_lines(&text);
-    enforce_budget(&text, line_count, budget)?;
-    Ok(ReviewDiff {
-        line_count,
-        text,
-        files,
-        skipped_files,
-    })
-}
-
 pub fn build_quick_review_diff(
     project_path: &Path,
     source: &DiffSource,
@@ -225,21 +159,6 @@ pub fn build_quick_review_diff(
         text,
         files,
         skipped_files,
-    })
-}
-
-pub fn git_context(project_path: &Path) -> Result<GitContext, DiffError> {
-    let root = git_root(project_path)?;
-    let commit_hash = git_text_or(&root, &["rev-parse", "HEAD"], "HEAD");
-    let commit_message = git_text_or(&root, &["log", "-1", "--format=%B"], "");
-    let author_name = git_text_or(&root, &["config", "user.name"], "unknown-author");
-    let repo_name = remote_repo_name(&root).unwrap_or_else(|| "unknown-repo".to_string());
-    Ok(GitContext {
-        root,
-        repo_name,
-        commit_hash,
-        author_name,
-        commit_message,
     })
 }
 
@@ -367,46 +286,6 @@ fn snapshot_file(
     }))
 }
 
-fn diff_for_snapshot(
-    root: &Path,
-    source: &DiffSource,
-    snapshot: &FileSnapshot,
-) -> Result<Option<String>, String> {
-    let diff = git_diff_for_path(root, source, &snapshot.path)?;
-    if !diff.trim().is_empty() {
-        return Ok(Some(diff.trim_end().to_string()));
-    }
-    if snapshot.before.is_empty() && !snapshot.after.is_empty() {
-        return Ok(Some(format_new_file_diff(&snapshot.path, &snapshot.after)));
-    }
-    Ok(None)
-}
-
-fn git_diff_for_path(root: &Path, source: &DiffSource, path: &str) -> Result<String, String> {
-    let mut command = Command::new("git");
-    command.current_dir(root);
-    match source {
-        DiffSource::WorkingTree => {
-            command.args(["diff", "--unified=100", "HEAD", "--"]);
-        }
-        DiffSource::Staged => {
-            command.args(["diff", "--cached", "--unified=100", "--"]);
-        }
-        DiffSource::Unstaged => {
-            command.args(["diff", "--unified=100", "--"]);
-        }
-        DiffSource::Base(base) => {
-            command.args(["diff", "--unified=100", base, "--"]);
-        }
-        DiffSource::DiffFile(_) => return Ok(String::new()),
-    }
-    let output = command.arg(path).output().map_err(|err| err.to_string())?;
-    if !output.status.success() {
-        return Err(stderr_text(&output.stderr));
-    }
-    String::from_utf8(output.stdout).map_err(|_| "git diff output is not valid UTF-8".to_string())
-}
-
 fn git_blob(root: &Path, rev_path: &str, max_file_bytes: u64) -> Result<Option<String>, String> {
     let output = Command::new("git")
         .current_dir(root)
@@ -445,20 +324,6 @@ fn bytes_to_text(bytes: Vec<u8>, max_file_bytes: u64) -> Result<Option<String>, 
     String::from_utf8(bytes)
         .map(Some)
         .map_err(|_| "not valid UTF-8".to_string())
-}
-
-fn format_new_file_diff(path: &str, text: &str) -> String {
-    let lines = split_like_unified_diff(text);
-    let mut out = vec![
-        format!("diff --git a/{path} b/{path}"),
-        "new file mode 100644".to_string(),
-        "index 0000000..0000000".to_string(),
-        "--- /dev/null".to_string(),
-        format!("+++ b/{path}"),
-        format!("@@ -0,0 +1,{} @@", lines.len()),
-    ];
-    out.extend(lines.into_iter().map(|line| format!("+{line}")));
-    out.join("\n")
 }
 
 fn format_full_file_diff(files: &[FileSnapshot]) -> String {
@@ -518,41 +383,6 @@ fn stderr_text(stderr: &[u8]) -> String {
     }
 }
 
-fn git_text_or(root: &Path, args: &[&str], default: &str) -> String {
-    let Ok(output) = Command::new("git").current_dir(root).args(args).output() else {
-        return default.to_string();
-    };
-    if !output.status.success() {
-        return default.to_string();
-    }
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if text.is_empty() {
-        default.to_string()
-    } else {
-        text
-    }
-}
-
-fn remote_repo_name(root: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .current_dir(root)
-        .args(["config", "--get", "remote.origin.url"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    parse_remote_repo_name(String::from_utf8_lossy(&output.stdout).trim())
-}
-
-fn parse_remote_repo_name(url: &str) -> Option<String> {
-    let trimmed = url.trim_end_matches(".git");
-    let (_, repo) = trimmed.rsplit_once([':', '/'])?;
-    let before_repo = &trimmed[..trimmed.len().saturating_sub(repo.len() + 1)];
-    let (_, owner) = before_repo.rsplit_once([':', '/'])?;
-    Some(format!("{owner}/{repo}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -573,26 +403,6 @@ mod tests {
     }
 
     #[test]
-    fn new_file_diff_matches_unified_shape() {
-        assert_eq!(
-            format_new_file_diff("new.txt", "hello"),
-            "diff --git a/new.txt b/new.txt\nnew file mode 100644\nindex 0000000..0000000\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1,1 @@\n+hello"
-        );
-    }
-
-    #[test]
-    fn parses_common_remote_repo_names() {
-        assert_eq!(
-            parse_remote_repo_name("git@github.com:owner/repo.git"),
-            Some("owner/repo".to_string())
-        );
-        assert_eq!(
-            parse_remote_repo_name("https://github.com/owner/repo"),
-            Some("owner/repo".to_string())
-        );
-    }
-
-    #[test]
     fn diff_file_respects_total_budget() {
         let tmp = TempDir::new().unwrap();
         let diff_file = tmp.path().join("change.diff");
@@ -602,7 +412,7 @@ mod tests {
         )
         .unwrap();
 
-        let error = build_review_diff(
+        let error = build_quick_review_diff(
             tmp.path(),
             &DiffSource::DiffFile(diff_file),
             1_000_000,

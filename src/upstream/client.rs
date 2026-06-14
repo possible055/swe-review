@@ -1,7 +1,6 @@
-use super::encode::{encode_check_bugs_request, encode_get_chat_message_request};
+use super::encode::encode_get_chat_message_request;
 use super::parse::{
-    jwt_expires_at, parse_check_bugs_response, parse_cli_model_configs, parse_cli_team_settings,
-    parse_get_chat_message_frames, parse_lifeguard_modes,
+    jwt_expires_at, parse_cli_model_configs, parse_cli_team_settings, parse_get_chat_message_frames,
 };
 use super::transport::{post, post_connect_stream};
 use crate::protobuf::ProtobufEncoder;
@@ -18,13 +17,9 @@ const API_SERVER_SERVICE: &str = "exa.api_server_pb.ApiServerService";
 const AUTH_SERVICE: &str = "exa.auth_pb.AuthService";
 const SEAT_MANAGEMENT_SERVICE: &str = "exa.seat_management_pb.SeatManagementService";
 const WS_APP: &str = "windsurf";
-const DEVIN_NEXT_APP: &str = "windsurf-next";
 const DEFAULT_WS_APP_VER: &str = "0.2.0";
 const DEFAULT_WS_LS_VER: &str = "1.110.1";
-const DEFAULT_DEVIN_NEXT_VERSION: &str = "1.110.1-next";
 const DEFAULT_CLOUD_VERSION: &str = "2.0.0";
-const ENV_DEVIN_NEXT_IDE_VERSION: &str = "SWE_REVIEW_DEVIN_NEXT_IDE_VERSION";
-const ENV_DEVIN_NEXT_EXTENSION_VERSION: &str = "SWE_REVIEW_DEVIN_NEXT_EXTENSION_VERSION";
 
 #[derive(Debug, Clone)]
 pub struct NativeClientOptions {
@@ -35,8 +30,6 @@ pub struct NativeClientOptions {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeClientIdentity {
-    devin_next_ide_version: String,
-    devin_next_extension_version: String,
     windsurf_extension_version: String,
     windsurf_ls_version: String,
     cloud_version: String,
@@ -45,39 +38,11 @@ pub struct NativeClientIdentity {
 impl Default for NativeClientIdentity {
     fn default() -> Self {
         Self {
-            devin_next_ide_version: DEFAULT_DEVIN_NEXT_VERSION.to_string(),
-            devin_next_extension_version: DEFAULT_WS_APP_VER.to_string(),
             windsurf_extension_version: DEFAULT_WS_APP_VER.to_string(),
             windsurf_ls_version: DEFAULT_WS_LS_VER.to_string(),
             cloud_version: DEFAULT_CLOUD_VERSION.to_string(),
         }
     }
-}
-
-impl NativeClientIdentity {
-    pub fn from_env() -> Self {
-        let defaults = Self::default();
-        Self {
-            devin_next_ide_version: env_value_or(
-                ENV_DEVIN_NEXT_IDE_VERSION,
-                defaults.devin_next_ide_version,
-            ),
-            devin_next_extension_version: env_value_or(
-                ENV_DEVIN_NEXT_EXTENSION_VERSION,
-                defaults.devin_next_extension_version,
-            ),
-            ..defaults
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct LifeguardMode {
-    pub name: String,
-    pub enabled: bool,
-    pub model_id: u64,
-    pub model_display_name: String,
-    pub agent_version: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -91,53 +56,6 @@ pub struct NativeModelConfig {
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct NativeTeamSettings {
     pub allowed_model_uids: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct CheckBugsReport {
-    pub bugs: Vec<ReviewBug>,
-    pub bug_check_id: Option<String>,
-    pub method_used: Option<String>,
-    pub model_used: Option<String>,
-    pub playgrounds: Option<String>,
-    pub model_id: Option<u64>,
-    pub agent_version: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct ReviewBug {
-    pub id: String,
-    pub file: String,
-    pub start: i32,
-    pub end: i32,
-    pub title: String,
-    pub description: String,
-    pub severity: String,
-    pub resolution: String,
-    pub confidence: Option<f64>,
-    pub categories: Vec<String>,
-    pub fix: Option<ReviewFix>,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct ReviewFix {
-    pub old_str: String,
-    pub new_str: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct CheckBugsRequest<'a> {
-    pub diff: &'a str,
-    pub repo_name: &'a str,
-    pub commit_hash: &'a str,
-    pub author_name: &'a str,
-    pub commit_message: &'a str,
-    pub user_rules: &'a [String],
-    pub method: &'a str,
-    pub symbol_context: &'a str,
-    pub check_type: &'a str,
-    pub base_ref: &'a str,
-    pub git_root: &'a str,
 }
 
 #[derive(Debug, Clone)]
@@ -170,8 +88,6 @@ pub enum NativeError {
     Connect(String),
     #[error("Failed to extract JWT from GetUserJwt response")]
     JwtMissing,
-    #[error("Lifeguard mode '{0}' is not available for this account or team")]
-    ModeUnavailable(String),
     #[error("Malformed protobuf response: {0}")]
     Decode(&'static str),
     #[error(
@@ -188,8 +104,6 @@ pub struct NativeClient {
     timeout_ms: u64,
     client: reqwest::Client,
     jwt: Option<String>,
-    lifeguard_session_id: String,
-    lifeguard_request_id: u64,
     identity: NativeClientIdentity,
 }
 
@@ -211,39 +125,8 @@ impl NativeClient {
             timeout_ms: options.timeout_ms,
             client,
             jwt: None,
-            lifeguard_session_id: Uuid::new_v4().to_string(),
-            lifeguard_request_id: 0,
             identity: options.identity,
         })
-    }
-
-    pub async fn get_lifeguard_mode(&mut self, method: &str) -> Result<LifeguardMode, NativeError> {
-        let metadata = self.lifeguard_metadata();
-        let mut request = ProtobufEncoder::new();
-        request.write_bytes(1, &metadata);
-        let response = self
-            .post(
-                &format!("{}/GetLifeguardConfig", self.api_base),
-                request.to_bytes(),
-            )
-            .await?;
-        let modes = parse_lifeguard_modes(&response)?;
-        modes
-            .into_iter()
-            .find(|mode| mode.name == method && mode.enabled)
-            .ok_or_else(|| NativeError::ModeUnavailable(method.to_string()))
-    }
-
-    pub async fn check_bugs(
-        &mut self,
-        request: CheckBugsRequest<'_>,
-    ) -> Result<CheckBugsReport, NativeError> {
-        let metadata = self.lifeguard_metadata();
-        let body = encode_check_bugs_request(&metadata, request);
-        let response = self
-            .post(&format!("{}/CheckBugs", self.api_base), body)
-            .await?;
-        parse_check_bugs_response(&response)
     }
 
     pub async fn get_cli_model_configs(&mut self) -> Result<Vec<NativeModelConfig>, NativeError> {
@@ -295,22 +178,6 @@ impl NativeClient {
             cascade_id,
             prompt_id,
         })
-    }
-
-    fn lifeguard_metadata(&mut self) -> Vec<u8> {
-        self.lifeguard_request_id += 1;
-        let mut metadata = ProtobufEncoder::new();
-        metadata.write_string(1, DEVIN_NEXT_APP);
-        metadata.write_string(2, &self.identity.devin_next_extension_version);
-        metadata.write_string(3, &self.api_key);
-        metadata.write_string(4, "en");
-        metadata.write_string(5, os_name());
-        metadata.write_string(7, &self.identity.devin_next_ide_version);
-        metadata.write_varint(9, self.lifeguard_request_id);
-        metadata.write_string(10, &self.lifeguard_session_id);
-        metadata.write_string(12, DEVIN_NEXT_APP);
-        metadata.write_string(26, "Unset");
-        metadata.to_bytes()
     }
 
     async fn jwt_metadata(&mut self) -> Result<Vec<u8>, NativeError> {
@@ -435,18 +302,9 @@ fn os_name() -> &'static str {
     }
 }
 
-fn env_value_or(name: &str, default: String) -> String {
-    env::var(name)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or(default)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protobuf::{field_string, field_varint, iter_fields};
 
     #[test]
     fn client_uses_fixed_official_endpoints() {
@@ -469,63 +327,5 @@ mod tests {
             client.seat_management_base,
             "https://server.codeium.com/exa.seat_management_pb.SeatManagementService"
         );
-    }
-
-    #[test]
-    fn lifeguard_metadata_matches_devin_next_shape() {
-        let mut client = NativeClient::new(NativeClientOptions {
-            api_key: Some("test-key".to_string()),
-            timeout_ms: 1000,
-            identity: NativeClientIdentity::default(),
-        })
-        .unwrap();
-
-        let first_metadata = client.lifeguard_metadata();
-        let second_metadata = client.lifeguard_metadata();
-        let first_fields = iter_fields(&first_metadata);
-        let second_fields = iter_fields(&second_metadata);
-        let first_session_id = first_fields
-            .iter()
-            .find(|field| field.number == 10)
-            .and_then(field_string);
-        let second_session_id = second_fields
-            .iter()
-            .find(|field| field.number == 10)
-            .and_then(field_string);
-
-        assert!(first_fields.iter().any(|field| {
-            field.number == 1 && field_string(field).as_deref() == Some("windsurf-next")
-        }));
-        assert!(
-            first_fields.iter().any(|field| {
-                field.number == 2 && field_string(field).as_deref() == Some("0.2.0")
-            })
-        );
-        assert!(first_fields.iter().any(|field| {
-            field.number == 3 && field_string(field).as_deref() == Some("test-key")
-        }));
-        assert!(first_fields.iter().any(|field| field.number == 5));
-        assert!(first_fields.iter().any(|field| {
-            field.number == 7 && field_string(field).as_deref() == Some("1.110.1-next")
-        }));
-        assert!(
-            first_fields
-                .iter()
-                .any(|field| field.number == 9 && field_varint(field) == Some(1))
-        );
-        assert!(
-            second_fields
-                .iter()
-                .any(|field| field.number == 9 && field_varint(field) == Some(2))
-        );
-        assert_eq!(first_session_id, second_session_id);
-        assert!(first_fields.iter().any(|field| {
-            field.number == 12 && field_string(field).as_deref() == Some("windsurf-next")
-        }));
-        assert!(first_fields.iter().any(|field| {
-            field.number == 26 && field_string(field).as_deref() == Some("Unset")
-        }));
-        assert!(!first_fields.iter().any(|field| field.number == 21));
-        assert!(!first_fields.iter().any(|field| field.number == 30));
     }
 }

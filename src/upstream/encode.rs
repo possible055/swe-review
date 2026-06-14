@@ -1,4 +1,4 @@
-use super::client::{CheckBugsRequest, NativeChatRequest};
+use super::client::NativeChatRequest;
 use crate::protobuf::ProtobufEncoder;
 
 const CHAT_REQUEST_TYPE_CASCADE: u64 = 5;
@@ -8,25 +8,6 @@ const CHAT_DEFAULT_MAX_OUTPUT_TOKENS: u64 = 32_000;
 const CHAT_DEFAULT_TEMPERATURE: f64 = 0.2;
 const CHAT_DEFAULT_TOP_P: f64 = 0.95;
 const CHAT_DEFAULT_TOP_K: u64 = 50;
-
-pub(super) fn encode_check_bugs_request(metadata: &[u8], request: CheckBugsRequest<'_>) -> Vec<u8> {
-    let mut encoder = ProtobufEncoder::new();
-    encoder.write_bytes(1, metadata);
-    encoder.write_string(2, request.diff);
-    encoder.write_string(3, request.repo_name);
-    encoder.write_string(4, request.commit_hash);
-    encoder.write_string(5, request.author_name);
-    encoder.write_string(7, request.commit_message);
-    for rule in request.user_rules {
-        encoder.write_string(9, rule);
-    }
-    encoder.write_string(10, request.method);
-    encoder.write_string(11, request.symbol_context);
-    encoder.write_string(12, request.check_type);
-    encoder.write_string(13, request.base_ref);
-    encoder.write_string(14, request.git_root);
-    encoder.to_bytes()
-}
 
 pub(super) fn encode_get_chat_message_request(
     metadata: &[u8],

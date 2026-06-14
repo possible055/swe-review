@@ -1,6 +1,6 @@
 use crate::credentials::resolve_api_key;
 use crate::diff::{ReviewDiff, SkippedFile, build_quick_review_diff};
-use crate::review_common::ReviewCommonOptions;
+use crate::review_options::ReviewOptions;
 use crate::upstream::{
     NativeChatRequest, NativeClient, NativeClientIdentity, NativeClientOptions, NativeError,
     NativeModelConfig, NativeTeamSettings, QUICK_REVIEW_DISPLAY_OPTION,
@@ -22,14 +22,14 @@ const QUICK_REVIEW_PROMPT: &str = "Review these changes in detail. Look for:\n- 
 
 #[derive(Debug, Clone)]
 pub struct QuickReviewOptions {
-    pub common: ReviewCommonOptions,
+    pub review: ReviewOptions,
     pub model: Option<String>,
 }
 
 impl QuickReviewOptions {
     pub fn new(project_path: impl Into<PathBuf>) -> Self {
         Self {
-            common: ReviewCommonOptions::new(project_path),
+            review: ReviewOptions::new(project_path),
             model: None,
         }
     }
@@ -43,7 +43,6 @@ pub struct QuickReviewReport {
     pub diff_files: Vec<String>,
     pub skipped_files: Vec<SkippedFile>,
     pub diff_line_count: usize,
-    pub restore_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -71,10 +70,10 @@ pub fn run_quick_review(
 ) -> Result<QuickReviewReport, QuickReviewError> {
     progress(on_progress, "Collecting Quick Review diff");
     let diff = build_quick_review_diff(
-        &options.common.project_path,
-        &options.common.source,
-        options.common.max_file_bytes,
-        options.common.diff_budget(),
+        &options.review.project_path,
+        &options.review.source,
+        options.review.max_file_bytes,
+        options.review.diff_budget(),
     )?;
     if diff.text.trim().is_empty() {
         return Err(QuickReviewError::NoChanges);
@@ -112,15 +111,15 @@ fn run_quick_review_native(
     let review_prompt = native_quick_review_prompt(&text);
 
     let (model, response) = runtime.block_on(async {
-        let api_key = resolve_api_key(options.common.api_key.clone()).map_err(|error| {
+        let api_key = resolve_api_key(options.review.api_key.clone()).map_err(|error| {
             NativeError::ApiKey(format!("Unable to resolve Windsurf API key: {error}"))
         })?;
         let is_session_token = api_key.is_session_token;
 
         let mut client = NativeClient::new(NativeClientOptions {
             api_key: Some(api_key.value),
-            timeout_ms: options.common.timeout_ms,
-            identity: NativeClientIdentity::from_env(),
+            timeout_ms: options.review.timeout_ms,
+            identity: NativeClientIdentity::default(),
         })?;
         let (models, team_settings) = discover_quick_review_catalog(&mut client, on_progress).await;
         let native_candidates =
@@ -174,7 +173,6 @@ fn run_quick_review_native(
         diff_files: file_paths,
         skipped_files,
         diff_line_count: line_count,
-        restore_error: None,
     })
 }
 
