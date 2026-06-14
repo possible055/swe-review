@@ -40,19 +40,21 @@ pub struct ReviewDiff {
     pub line_count: usize,
 }
 
+pub const DEFAULT_MAX_TOTAL_DIFF_BYTES: usize = 512_000;
+pub const DEFAULT_MAX_TOTAL_DIFF_LINES: usize = 12_000;
+pub const DEFAULT_MAX_ESTIMATED_TOKENS: u64 = 120_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DiffBudget {
     pub max_total_diff_bytes: usize,
     pub max_total_diff_lines: usize,
-    pub max_estimated_tokens: u64,
 }
 
 impl Default for DiffBudget {
     fn default() -> Self {
         Self {
-            max_total_diff_bytes: 512_000,
-            max_total_diff_lines: 12_000,
-            max_estimated_tokens: 100_000,
+            max_total_diff_bytes: DEFAULT_MAX_TOTAL_DIFF_BYTES,
+            max_total_diff_lines: DEFAULT_MAX_TOTAL_DIFF_LINES,
         }
     }
 }
@@ -363,14 +365,6 @@ fn enforce_budget(text: &str, line_count: usize, budget: DiffBudget) -> Result<(
             limit: budget.max_total_diff_lines as u64,
         });
     }
-    let tokens = crate::util::estimate_tokens(text);
-    if tokens > budget.max_estimated_tokens {
-        return Err(DiffError::DiffBudgetExceeded {
-            metric: "estimated tokens",
-            actual: tokens,
-            limit: budget.max_estimated_tokens,
-        });
-    }
     Ok(())
 }
 
@@ -419,7 +413,6 @@ mod tests {
             DiffBudget {
                 max_total_diff_bytes: 10,
                 max_total_diff_lines: 100,
-                max_estimated_tokens: 100,
             },
         )
         .unwrap_err();

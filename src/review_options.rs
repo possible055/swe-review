@@ -1,4 +1,4 @@
-use crate::diff::{DiffBudget, DiffSource};
+use crate::diff::{DEFAULT_MAX_ESTIMATED_TOKENS, DiffBudget, DiffSource};
 use std::path::PathBuf;
 
 const DEFAULT_MAX_FILE_BYTES: u64 = 1_000_000;
@@ -25,7 +25,7 @@ impl ReviewOptions {
             max_file_bytes: DEFAULT_MAX_FILE_BYTES,
             max_total_diff_bytes: budget.max_total_diff_bytes,
             max_total_diff_lines: budget.max_total_diff_lines,
-            max_estimated_tokens: budget.max_estimated_tokens,
+            max_estimated_tokens: DEFAULT_MAX_ESTIMATED_TOKENS,
             timeout_ms: 120_000,
         }
     }
@@ -34,7 +34,6 @@ impl ReviewOptions {
         DiffBudget {
             max_total_diff_bytes: self.max_total_diff_bytes,
             max_total_diff_lines: self.max_total_diff_lines,
-            max_estimated_tokens: self.max_estimated_tokens,
         }
     }
 }

@@ -1,5 +1,8 @@
 use crate::credentials::{extract_key, mask_api_key, write_swe_tools_config_api_key};
-use crate::diff::DiffSource;
+use crate::diff::{
+    DEFAULT_MAX_ESTIMATED_TOKENS, DEFAULT_MAX_TOTAL_DIFF_BYTES, DEFAULT_MAX_TOTAL_DIFF_LINES,
+    DiffSource,
+};
 use crate::quick_review::{QuickReviewOptions, run_quick_review};
 use crate::review_options::ReviewOptions;
 use clap::{Args, Parser, Subcommand};
@@ -75,22 +78,22 @@ struct ReviewArgs {
 
     #[arg(
         long,
-        default_value_t = 512_000,
+        default_value_t = DEFAULT_MAX_TOTAL_DIFF_BYTES,
         help = "Fail when the prepared diff exceeds this many bytes."
     )]
     max_total_diff_bytes: usize,
 
     #[arg(
         long,
-        default_value_t = 12_000,
+        default_value_t = DEFAULT_MAX_TOTAL_DIFF_LINES,
         help = "Fail when the prepared diff exceeds this many lines."
     )]
     max_total_diff_lines: usize,
 
     #[arg(
         long,
-        default_value_t = 100_000,
-        help = "Fail when the prepared diff estimate exceeds this many tokens."
+        default_value_t = DEFAULT_MAX_ESTIMATED_TOKENS,
+        help = "Fail when the prepared prompt exceeds this many tiktoken tokens."
     )]
     max_estimated_tokens: u64,
 
@@ -292,9 +295,9 @@ mod tests {
             base: None,
             diff_file: None,
             max_file_bytes: 100,
-            max_total_diff_bytes: 512_000,
-            max_total_diff_lines: 12_000,
-            max_estimated_tokens: 100_000,
+            max_total_diff_bytes: DEFAULT_MAX_TOTAL_DIFF_BYTES,
+            max_total_diff_lines: DEFAULT_MAX_TOTAL_DIFF_LINES,
+            max_estimated_tokens: DEFAULT_MAX_ESTIMATED_TOKENS,
             timeout_ms: 1000,
             json: false,
         }

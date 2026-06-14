@@ -95,7 +95,7 @@ swe-review quick-review --path . \
   --max-file-bytes 1000000 \
   --max-total-diff-bytes 512000 \
   --max-total-diff-lines 12000 \
-  --max-estimated-tokens 100000
+  --max-estimated-tokens 120000
 ```
 
 ## Credentials

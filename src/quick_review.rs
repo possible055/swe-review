@@ -109,6 +109,7 @@ fn run_quick_review_native(
     } = diff;
     let file_paths = files.into_iter().map(|file| file.path).collect::<Vec<_>>();
     let review_prompt = native_quick_review_prompt(&text);
+    enforce_prompt_token_budget(&review_prompt, options.review.max_estimated_tokens)?;
 
     let (model, response) = runtime.block_on(async {
         let api_key = resolve_api_key(options.review.api_key.clone()).map_err(|error| {
@@ -174,6 +175,18 @@ fn run_quick_review_native(
         skipped_files,
         diff_line_count: line_count,
     })
+}
+
+fn enforce_prompt_token_budget(prompt: &str, limit: u64) -> Result<(), QuickReviewError> {
+    if let Some(tokens) = crate::util::exceeds_token_limit(prompt, limit) {
+        return Err(crate::diff::DiffError::DiffBudgetExceeded {
+            metric: "tokens",
+            actual: tokens,
+            limit,
+        }
+        .into());
+    }
+    Ok(())
 }
 
 async fn discover_quick_review_catalog(
@@ -448,5 +461,12 @@ mod tests {
         assert!(prompt.contains("uri=\"diff://workspace/changes\""));
         assert!(prompt.contains("mimeType=\"text/x-diff\""));
         assert!(prompt.contains("--- a/src/lib.rs"));
+    }
+
+    #[test]
+    fn prompt_token_budget_counts_full_prompt_wrapper() {
+        let prompt = native_quick_review_prompt("small diff");
+
+        enforce_prompt_token_budget(&prompt, 1).unwrap_err();
     }
 }
