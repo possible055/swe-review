@@ -498,7 +498,7 @@ fn enforce_budget(text: &str, line_count: usize, budget: DiffBudget) -> Result<(
             limit: budget.max_total_diff_lines as u64,
         });
     }
-    let tokens = estimate_tokens(text);
+    let tokens = crate::util::estimate_tokens(text);
     if tokens > budget.max_estimated_tokens {
         return Err(DiffError::DiffBudgetExceeded {
             metric: "estimated tokens",
@@ -507,10 +507,6 @@ fn enforce_budget(text: &str, line_count: usize, budget: DiffBudget) -> Result<(
         });
     }
     Ok(())
-}
-
-fn estimate_tokens(text: &str) -> u64 {
-    (text.chars().count() as u64 / 4).max(1)
 }
 
 fn stderr_text(stderr: &[u8]) -> String {

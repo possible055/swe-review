@@ -2,6 +2,7 @@ use crate::credentials::{extract_key, mask_api_key, write_swe_tools_config_api_k
 use crate::diff::DiffSource;
 use crate::lifeguard::{ReviewOptions, run_review};
 use crate::quick_review::{QuickReviewOptions, run_quick_review};
+use crate::review_common::ReviewCommonOptions;
 use clap::{Args, Parser, Subcommand};
 use std::env;
 use std::io::Write;
@@ -27,14 +28,8 @@ enum Commands {
 
 #[derive(Debug, Args)]
 struct ReviewArgs {
-    #[arg(long, help = "Absolute or relative path to the Git project root.")]
-    path: PathBuf,
-
-    #[arg(
-        long,
-        help = "Windsurf API key. Defaults to WINDSURF_API_KEY or swe-tools/config.json."
-    )]
-    api_key: Option<String>,
+    #[command(flatten)]
+    common: ReviewCommonArgs,
 
     #[arg(
         long,
@@ -43,76 +38,24 @@ struct ReviewArgs {
         help = "Lifeguard method to run."
     )]
     method: String,
-
-    #[arg(long, help = "Review only staged changes.")]
-    staged: bool,
-
-    #[arg(long, help = "Review only unstaged and untracked changes.")]
-    unstaged: bool,
-
-    #[arg(
-        long,
-        value_name = "REF",
-        help = "Review working tree changes against a base ref."
-    )]
-    base: Option<String>,
-
-    #[arg(
-        long,
-        value_name = "FILE",
-        help = "Read an existing unified diff file."
-    )]
-    diff_file: Option<PathBuf>,
-
-    #[arg(
-        long,
-        default_value_t = 1_000_000,
-        help = "Skip changed files larger than this many bytes."
-    )]
-    max_file_bytes: u64,
-
-    #[arg(
-        long,
-        default_value_t = 512_000,
-        help = "Fail when the prepared diff exceeds this many bytes."
-    )]
-    max_total_diff_bytes: usize,
-
-    #[arg(
-        long,
-        default_value_t = 12_000,
-        help = "Fail when the prepared diff exceeds this many lines."
-    )]
-    max_total_diff_lines: usize,
-
-    #[arg(
-        long,
-        default_value_t = 100_000,
-        help = "Fail when the prepared diff estimate exceeds this many tokens."
-    )]
-    max_estimated_tokens: u64,
-
-    #[arg(
-        long,
-        default_value_t = 120_000,
-        help = "HTTP request timeout in milliseconds."
-    )]
-    timeout_ms: u64,
-
-    #[arg(long, help = "Print a JSON report instead of Markdown.")]
-    json: bool,
 }
 
 #[derive(Debug, Args)]
 struct QuickReviewArgs {
-    #[arg(long, help = "Absolute or relative path to the Git project root.")]
-    path: PathBuf,
+    #[command(flatten)]
+    common: ReviewCommonArgs,
 
     #[arg(
         long,
-        help = "Model config value to use. Defaults to the first discovered Quick Review model."
+        help = "Quick Review model to use: swe-check, opus-4-7-review, or gpt-5-5-review. Defaults to swe-check."
     )]
     model: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct ReviewCommonArgs {
+    #[arg(long, help = "Absolute or relative path to the Git project root.")]
+    path: PathBuf,
 
     #[arg(
         long,
@@ -201,27 +144,18 @@ pub fn run() -> i32 {
 }
 
 fn run_review_command(args: ReviewArgs) -> i32 {
-    let source = match review_source(&args) {
+    let source = match review_source(&args.common) {
         Ok(source) => source,
         Err(message) => {
             eprintln!("Error: {message}");
             return 2;
         }
     };
-    let mut options = ReviewOptions::new(absolute_path(&args.path));
-    options.source = source;
-    options.api_key = args.api_key;
+    let mut options = ReviewOptions::new(absolute_path(&args.common.path));
+    apply_common_options(&mut options.common, source, &args.common);
     options.method = args.method;
-    options.max_file_bytes = args.max_file_bytes;
-    options.max_total_diff_bytes = args.max_total_diff_bytes;
-    options.max_total_diff_lines = args.max_total_diff_lines;
-    options.max_estimated_tokens = args.max_estimated_tokens;
-    options.timeout_ms = args.timeout_ms;
 
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
+    let runtime = match crate::util::build_review_runtime() {
         Ok(runtime) => runtime,
         Err(error) => {
             eprintln!("Unexpected error: {error}");
@@ -234,7 +168,7 @@ fn run_review_command(args: ReviewArgs) -> i32 {
     };
 
     match runtime.block_on(async { run_review(options, Some(&progress)).await }) {
-        Ok(report) if args.json => match serde_json::to_string_pretty(&report) {
+        Ok(report) if args.common.json => match serde_json::to_string_pretty(&report) {
             Ok(text) => {
                 println!("{text}");
                 0
@@ -311,27 +245,16 @@ fn run_extract_key(args: ExtractKeyArgs) -> i32 {
 }
 
 fn run_quick_review_command(args: QuickReviewArgs) -> i32 {
-    let source = match diff_source(
-        args.staged,
-        args.unstaged,
-        args.base.as_deref(),
-        args.diff_file.as_deref(),
-    ) {
+    let source = match review_source(&args.common) {
         Ok(source) => source,
         Err(message) => {
             eprintln!("Error: {message}");
             return 2;
         }
     };
-    let mut options = QuickReviewOptions::new(absolute_path(&args.path));
-    options.source = source;
+    let mut options = QuickReviewOptions::new(absolute_path(&args.common.path));
+    apply_common_options(&mut options.common, source, &args.common);
     options.model = args.model;
-    options.api_key = args.api_key;
-    options.max_file_bytes = args.max_file_bytes;
-    options.max_total_diff_bytes = args.max_total_diff_bytes;
-    options.max_total_diff_lines = args.max_total_diff_lines;
-    options.max_estimated_tokens = args.max_estimated_tokens;
-    options.timeout_ms = args.timeout_ms;
 
     let progress = |message: &str| {
         eprintln!("[swe-review] {message}");
@@ -339,7 +262,7 @@ fn run_quick_review_command(args: QuickReviewArgs) -> i32 {
     };
 
     match run_quick_review(options, Some(&progress)) {
-        Ok(report) if args.json => match serde_json::to_string_pretty(&report) {
+        Ok(report) if args.common.json => match serde_json::to_string_pretty(&report) {
             Ok(text) => {
                 println!("{text}");
                 0
@@ -372,7 +295,7 @@ fn run_quick_review_command(args: QuickReviewArgs) -> i32 {
     }
 }
 
-fn review_source(args: &ReviewArgs) -> Result<DiffSource, String> {
+fn review_source(args: &ReviewCommonArgs) -> Result<DiffSource, String> {
     diff_source(
         args.staged,
         args.unstaged,
@@ -411,6 +334,20 @@ fn diff_source(
     Ok(DiffSource::WorkingTree)
 }
 
+fn apply_common_options(
+    options: &mut ReviewCommonOptions,
+    source: DiffSource,
+    args: &ReviewCommonArgs,
+) {
+    options.source = source;
+    options.api_key = args.api_key.clone();
+    options.max_file_bytes = args.max_file_bytes;
+    options.max_total_diff_bytes = args.max_total_diff_bytes;
+    options.max_total_diff_lines = args.max_total_diff_lines;
+    options.max_estimated_tokens = args.max_estimated_tokens;
+    options.timeout_ms = args.timeout_ms;
+}
+
 fn absolute_path(path: &Path) -> PathBuf {
     let candidate = if path.is_absolute() {
         path.to_path_buf()
@@ -426,11 +363,10 @@ fn absolute_path(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
-    fn args() -> ReviewArgs {
-        ReviewArgs {
+    fn args() -> ReviewCommonArgs {
+        ReviewCommonArgs {
             path: PathBuf::from("."),
             api_key: None,
-            method: "agent".to_string(),
             staged: false,
             unstaged: false,
             base: None,

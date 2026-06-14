@@ -1,43 +1,27 @@
 use crate::credentials::resolve_api_key;
-use crate::diff::{
-    DiffBudget, DiffSource, ReviewDiff, SkippedFile, build_review_diff, git_context,
-};
+use crate::diff::{DiffSource, ReviewDiff, SkippedFile, build_review_diff, git_context};
 use crate::lifeguard_rules::{RulesError, read_user_rules};
+use crate::review_common::ReviewCommonOptions;
 use crate::upstream::{
-    CheckBugsReport, CheckBugsRequest, LifeguardMode, NativeClient, NativeClientEndpoint,
+    CheckBugsReport, CheckBugsRequest, LifeguardMode, NativeClient, NativeClientIdentity,
     NativeClientOptions, NativeError, format_bugs_markdown,
 };
+use crate::util::progress;
 use serde::Serialize;
 use std::path::PathBuf;
 use thiserror::Error;
 
-const DEFAULT_MAX_FILE_BYTES: u64 = 1_000_000;
-
 #[derive(Debug, Clone)]
 pub struct ReviewOptions {
-    pub project_path: PathBuf,
-    pub source: DiffSource,
-    pub api_key: Option<String>,
+    pub common: ReviewCommonOptions,
     pub method: String,
-    pub max_file_bytes: u64,
-    pub max_total_diff_bytes: usize,
-    pub max_total_diff_lines: usize,
-    pub max_estimated_tokens: u64,
-    pub timeout_ms: u64,
 }
 
 impl ReviewOptions {
     pub fn new(project_path: impl Into<PathBuf>) -> Self {
         Self {
-            project_path: project_path.into(),
-            source: DiffSource::WorkingTree,
-            api_key: None,
+            common: ReviewCommonOptions::new(project_path),
             method: "agent".to_string(),
-            max_file_bytes: DEFAULT_MAX_FILE_BYTES,
-            max_total_diff_bytes: DiffBudget::default().max_total_diff_bytes,
-            max_total_diff_lines: DiffBudget::default().max_total_diff_lines,
-            max_estimated_tokens: DiffBudget::default().max_estimated_tokens,
-            timeout_ms: 120_000,
         }
     }
 }
@@ -69,13 +53,13 @@ pub async fn run_review(
     options: ReviewOptions,
     on_progress: Option<&(dyn Fn(&str) + Sync)>,
 ) -> Result<ReviewReport, ReviewError> {
-    let git = git_context(&options.project_path)?;
+    let git = git_context(&options.common.project_path)?;
     progress(on_progress, "Collecting diff");
     let diff = build_review_diff(
-        &options.project_path,
-        &options.source,
-        options.max_file_bytes,
-        options.diff_budget(),
+        &options.common.project_path,
+        &options.common.source,
+        options.common.max_file_bytes,
+        options.common.diff_budget(),
     )?;
     if diff.text.trim().is_empty() {
         return Err(ReviewError::NoChanges);
@@ -102,13 +86,13 @@ pub async fn run_review(
         &format!("Loaded {} Lifeguard rule(s)", user_rules.len()),
     );
 
-    let api_key = resolve_api_key(options.api_key).map_err(|error| {
+    let api_key = resolve_api_key(options.common.api_key).map_err(|error| {
         NativeError::ApiKey(format!("Unable to resolve Windsurf API key: {error}"))
     })?;
     let mut client = NativeClient::new(NativeClientOptions {
         api_key: Some(api_key.value),
-        endpoint: NativeClientEndpoint::Lifeguard,
-        timeout_ms: options.timeout_ms,
+        timeout_ms: options.common.timeout_ms,
+        identity: NativeClientIdentity::from_env(),
     })?;
     progress(on_progress, "Checking Lifeguard config");
     let mode = client.get_lifeguard_mode(&options.method).await?;
@@ -119,8 +103,8 @@ pub async fn run_review(
             mode.name, mode.model_display_name, mode.agent_version
         ),
     );
-    let check_type = check_type(&options.source);
-    let base_ref = match &options.source {
+    let check_type = check_type(&options.common.source);
+    let base_ref = match &options.common.source {
         DiffSource::Base(base) => base.as_str(),
         _ => "",
     };
@@ -153,25 +137,9 @@ pub async fn run_review(
     })
 }
 
-impl ReviewOptions {
-    fn diff_budget(&self) -> DiffBudget {
-        DiffBudget {
-            max_total_diff_bytes: self.max_total_diff_bytes,
-            max_total_diff_lines: self.max_total_diff_lines,
-            max_estimated_tokens: self.max_estimated_tokens,
-        }
-    }
-}
-
 fn check_type(source: &DiffSource) -> &'static str {
     match source {
         DiffSource::Base(_) => "compareWithRef",
         _ => "currentChanges",
-    }
-}
-
-fn progress(on_progress: Option<&(dyn Fn(&str) + Sync)>, message: &str) {
-    if let Some(on_progress) = on_progress {
-        on_progress(message);
     }
 }

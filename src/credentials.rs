@@ -13,6 +13,7 @@ pub const CONFIG_KEY: &str = "WINDSURF_API_KEY";
 const WINDSURF_AUTH_STATUS_KEY: &str = "windsurfAuthStatus";
 const WINDSURF_API_KEY_FIELD: &str = "apiKey";
 const SESSION_TOKEN_PREFIX: &str = "devin-session-token$";
+const AUTH_DB_APP_NAMES: &[&str] = &["Devin - Next", "devin", "Windsurf"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedApiKey {
@@ -257,8 +258,12 @@ fn write_swe_tools_config_api_key_to(path: &Path, api_key: &str) -> Result<(), C
             source,
         })?;
     }
-    let text = serde_json::to_string_pretty(&json!({ "WINDSURF_API_KEY": api_key }))
-        .expect("static JSON object serializes");
+    let text = serde_json::to_string_pretty(&json!({ CONFIG_KEY: api_key })).map_err(|source| {
+        CredentialsError::Json {
+            path: path.to_path_buf(),
+            source,
+        }
+    })?;
     fs::write(path, format!("{text}\n")).map_err(|source| CredentialsError::Write {
         path: path.to_path_buf(),
         source,
@@ -328,6 +333,40 @@ fn auth_db_path(base: &Path, app_name: &str) -> PathBuf {
         .join("state.vscdb")
 }
 
+fn push_auth_db_path_candidates(candidates: &mut Vec<PathBuf>, base: &Path) {
+    for app_name in AUTH_DB_APP_NAMES {
+        candidates.push(auth_db_path(base, app_name));
+    }
+}
+
+/// `AppData/Roaming` directories for every non-hidden user profile discovered under
+/// `/mnt/c/Users`. Returns an empty list when the host is not WSL or the directory
+/// is unreadable, so callers on macOS/Windows/other Linux hosts pay no cost.
+fn windows_wsl_roaming_dirs() -> Vec<PathBuf> {
+    let c_users = Path::new("/mnt/c/Users");
+    if !c_users.exists() {
+        return Vec::new();
+    }
+    let Ok(users) = fs::read_dir(c_users) else {
+        return Vec::new();
+    };
+    let mut dirs = Vec::new();
+    for entry in users.flatten() {
+        let user_dir = entry.path();
+        if !user_dir.is_dir() {
+            continue;
+        }
+        let Some(name) = user_dir.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name.starts_with('.') {
+            continue;
+        }
+        dirs.push(user_dir.join("AppData").join("Roaming"));
+    }
+    dirs
+}
+
 fn devin_credentials_path_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
 
@@ -351,29 +390,8 @@ fn devin_credentials_path_candidates() -> Vec<PathBuf> {
         );
     }
 
-    let c_users = Path::new("/mnt/c/Users");
-    if c_users.exists()
-        && let Ok(users) = fs::read_dir(c_users)
-    {
-        for entry in users.flatten() {
-            let user_dir = entry.path();
-            if !user_dir.is_dir() {
-                continue;
-            }
-            let Some(name) = user_dir.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if name.starts_with('.') {
-                continue;
-            }
-            candidates.push(
-                user_dir
-                    .join("AppData")
-                    .join("Roaming")
-                    .join("devin")
-                    .join("credentials.toml"),
-            );
-        }
+    for roaming in windows_wsl_roaming_dirs() {
+        candidates.push(roaming.join("devin").join("credentials.toml"));
     }
 
     candidates
@@ -460,49 +478,29 @@ fn auth_db_path_candidates() -> Result<Vec<PathBuf>, String> {
     if cfg!(target_os = "macos") {
         let home = home.ok_or("Cannot determine HOME path")?;
         let app_support = home.join("Library").join("Application Support");
-        return Ok(vec![
-            auth_db_path(&app_support, "Windsurf"),
-            auth_db_path(&app_support, "devin"),
-        ]);
+        let mut candidates = Vec::new();
+        push_auth_db_path_candidates(&mut candidates, &app_support);
+        return Ok(candidates);
     }
 
     if cfg!(target_os = "windows") {
         let appdata = env::var_os("APPDATA").ok_or("Cannot determine APPDATA path")?;
         let appdata = PathBuf::from(appdata);
-        return Ok(vec![
-            auth_db_path(&appdata, "Windsurf"),
-            auth_db_path(&appdata, "devin"),
-        ]);
+        let mut candidates = Vec::new();
+        push_auth_db_path_candidates(&mut candidates, &appdata);
+        return Ok(candidates);
     }
 
     let mut candidates = Vec::new();
-    let c_users = Path::new("/mnt/c/Users");
-    if c_users.exists()
-        && let Ok(users) = fs::read_dir(c_users)
-    {
-        for entry in users.flatten() {
-            let user_dir = entry.path();
-            if !user_dir.is_dir() {
-                continue;
-            }
-            let Some(name) = user_dir.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if name.starts_with('.') {
-                continue;
-            }
-            let roaming = user_dir.join("AppData").join("Roaming");
-            candidates.push(auth_db_path(&roaming, "Windsurf"));
-            candidates.push(auth_db_path(&roaming, "devin"));
-        }
+    for roaming in windows_wsl_roaming_dirs() {
+        push_auth_db_path_candidates(&mut candidates, &roaming);
     }
 
     let config_dir = env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| home.map(|path| path.join(".config")))
         .ok_or("Cannot determine HOME path")?;
-    candidates.push(auth_db_path(&config_dir, "Windsurf"));
-    candidates.push(auth_db_path(&config_dir, "devin"));
+    push_auth_db_path_candidates(&mut candidates, &config_dir);
     Ok(candidates)
 }
 
@@ -884,6 +882,32 @@ mod tests {
 
         assert_eq!(resolved.value, raw);
         assert!(resolved.is_session_token);
+    }
+
+    #[test]
+    fn auth_db_candidates_prefer_devin_next() {
+        let base = PathBuf::from(r"C:\Users\Alice\AppData\Roaming");
+        let mut candidates = Vec::new();
+
+        push_auth_db_path_candidates(&mut candidates, &base);
+
+        assert_eq!(
+            candidates,
+            vec![
+                base.join("Devin - Next")
+                    .join("User")
+                    .join("globalStorage")
+                    .join("state.vscdb"),
+                base.join("devin")
+                    .join("User")
+                    .join("globalStorage")
+                    .join("state.vscdb"),
+                base.join("Windsurf")
+                    .join("User")
+                    .join("globalStorage")
+                    .join("state.vscdb"),
+            ]
+        );
     }
 
     fn write_auth_db(db_path: &Path, value: Value) {
