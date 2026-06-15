@@ -1,8 +1,5 @@
 use crate::credentials::{extract_key, mask_api_key, write_swe_tools_config_api_key};
-use crate::diff::{
-    DEFAULT_MAX_ESTIMATED_TOKENS, DEFAULT_MAX_TOTAL_DIFF_BYTES, DEFAULT_MAX_TOTAL_DIFF_LINES,
-    DiffSource,
-};
+use crate::diff::DiffSource;
 use crate::quick_review::{QuickReviewOptions, run_quick_review};
 use crate::review_options::ReviewOptions;
 use clap::{Args, Parser, Subcommand};
@@ -10,20 +7,30 @@ use std::env;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+const MAX_FILE_BYTES_ENV: &str = "SWE_REVIEW_MAX_FILE_BYTES";
+const MAX_TOTAL_DIFF_BYTES_ENV: &str = "SWE_REVIEW_MAX_TOTAL_DIFF_BYTES";
+const MAX_TOTAL_DIFF_LINES_ENV: &str = "SWE_REVIEW_MAX_TOTAL_DIFF_LINES";
+const MAX_ESTIMATED_TOKENS_ENV: &str = "SWE_REVIEW_MAX_ESTIMATED_TOKENS";
+const TIMEOUT_MS_ENV: &str = "SWE_REVIEW_TIMEOUT_MS";
+
 #[derive(Debug, Parser)]
 #[command(name = "swe-review", version)]
+#[command(about = "Run Quick Review over local changes")]
 #[command(disable_help_subcommand = true)]
+#[command(args_conflicts_with_subcommands = true)]
+#[command(subcommand_negates_reqs = true)]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
+
+    #[command(flatten)]
+    review: QuickReviewArgs,
 }
 
 #[derive(Debug, Subcommand)]
 enum Commands {
     #[command(about = "Extract Windsurf API key from local database")]
     ExtractKey(ExtractKeyArgs),
-    #[command(about = "Run Quick Review over local changes")]
-    QuickReview(QuickReviewArgs),
 }
 
 #[derive(Debug, Args)]
@@ -41,7 +48,7 @@ struct QuickReviewArgs {
 #[derive(Debug, Args)]
 struct ReviewArgs {
     #[arg(long, help = "Absolute or relative path to the Git project root.")]
-    path: PathBuf,
+    path: Option<PathBuf>,
 
     #[arg(
         long,
@@ -58,51 +65,9 @@ struct ReviewArgs {
     #[arg(
         long,
         value_name = "REF",
-        help = "Review working tree changes against a base ref."
+        help = "Compare working tree changes against a Git ref."
     )]
     base: Option<String>,
-
-    #[arg(
-        long,
-        value_name = "FILE",
-        help = "Read an existing unified diff file."
-    )]
-    diff_file: Option<PathBuf>,
-
-    #[arg(
-        long,
-        default_value_t = 1_000_000,
-        help = "Skip changed files larger than this many bytes."
-    )]
-    max_file_bytes: u64,
-
-    #[arg(
-        long,
-        default_value_t = DEFAULT_MAX_TOTAL_DIFF_BYTES,
-        help = "Fail when the prepared diff exceeds this many bytes."
-    )]
-    max_total_diff_bytes: usize,
-
-    #[arg(
-        long,
-        default_value_t = DEFAULT_MAX_TOTAL_DIFF_LINES,
-        help = "Fail when the prepared diff exceeds this many lines."
-    )]
-    max_total_diff_lines: usize,
-
-    #[arg(
-        long,
-        default_value_t = DEFAULT_MAX_ESTIMATED_TOKENS,
-        help = "Fail when the prepared prompt exceeds this many tiktoken tokens."
-    )]
-    max_estimated_tokens: u64,
-
-    #[arg(
-        long,
-        default_value_t = 120_000,
-        help = "HTTP request timeout in milliseconds."
-    )]
-    timeout_ms: u64,
 
     #[arg(long, help = "Print a JSON report instead of Markdown.")]
     json: bool,
@@ -123,8 +88,8 @@ struct ExtractKeyArgs {
 pub fn run() -> i32 {
     let cli = Cli::parse();
     match cli.command {
-        Commands::ExtractKey(args) => run_extract_key(args),
-        Commands::QuickReview(args) => run_quick_review_command(args),
+        Some(Commands::ExtractKey(args)) => run_extract_key(args),
+        None => run_quick_review_command(cli.review),
     }
 }
 
@@ -175,6 +140,10 @@ fn run_extract_key(args: ExtractKeyArgs) -> i32 {
 }
 
 fn run_quick_review_command(args: QuickReviewArgs) -> i32 {
+    let Some(path) = args.review.path.as_deref() else {
+        eprintln!("Error: --path is required");
+        return 2;
+    };
     let source = match diff_source_from_args(&args.review) {
         Ok(source) => source,
         Err(message) => {
@@ -182,8 +151,11 @@ fn run_quick_review_command(args: QuickReviewArgs) -> i32 {
             return 2;
         }
     };
-    let mut options = QuickReviewOptions::new(absolute_path(&args.review.path));
-    apply_review_options(&mut options.review, source, &args.review);
+    let mut options = QuickReviewOptions::new(absolute_path(path));
+    if let Err(message) = apply_review_options(&mut options.review, source, &args.review) {
+        eprintln!("Error: {message}");
+        return 2;
+    }
     options.model = args.model;
 
     let progress = |message: &str| {
@@ -223,28 +195,13 @@ fn run_quick_review_command(args: QuickReviewArgs) -> i32 {
 }
 
 fn diff_source_from_args(args: &ReviewArgs) -> Result<DiffSource, String> {
-    diff_source(
-        args.staged,
-        args.unstaged,
-        args.base.as_deref(),
-        args.diff_file.as_deref(),
-    )
+    diff_source(args.staged, args.unstaged, args.base.as_deref())
 }
 
-fn diff_source(
-    staged: bool,
-    unstaged: bool,
-    base: Option<&str>,
-    diff_file: Option<&Path>,
-) -> Result<DiffSource, String> {
-    let selected = staged as usize
-        + unstaged as usize
-        + usize::from(base.is_some())
-        + usize::from(diff_file.is_some());
+fn diff_source(staged: bool, unstaged: bool, base: Option<&str>) -> Result<DiffSource, String> {
+    let selected = staged as usize + unstaged as usize + usize::from(base.is_some());
     if selected > 1 {
-        return Err(
-            "--staged, --unstaged, --base, and --diff-file are mutually exclusive".to_string(),
-        );
+        return Err("--staged, --unstaged, and --base are mutually exclusive".to_string());
     }
     if staged {
         return Ok(DiffSource::Staged);
@@ -255,20 +212,38 @@ fn diff_source(
     if let Some(base) = base {
         return Ok(DiffSource::Base(base.to_string()));
     }
-    if let Some(diff_file) = diff_file {
-        return Ok(DiffSource::DiffFile(diff_file.to_path_buf()));
-    }
     Ok(DiffSource::WorkingTree)
 }
 
-fn apply_review_options(options: &mut ReviewOptions, source: DiffSource, args: &ReviewArgs) {
+fn apply_review_options(
+    options: &mut ReviewOptions,
+    source: DiffSource,
+    args: &ReviewArgs,
+) -> Result<(), String> {
     options.source = source;
     options.api_key = args.api_key.clone();
-    options.max_file_bytes = args.max_file_bytes;
-    options.max_total_diff_bytes = args.max_total_diff_bytes;
-    options.max_total_diff_lines = args.max_total_diff_lines;
-    options.max_estimated_tokens = args.max_estimated_tokens;
-    options.timeout_ms = args.timeout_ms;
+    options.max_file_bytes = env_value(MAX_FILE_BYTES_ENV, options.max_file_bytes)?;
+    options.max_total_diff_bytes =
+        env_value(MAX_TOTAL_DIFF_BYTES_ENV, options.max_total_diff_bytes)?;
+    options.max_total_diff_lines =
+        env_value(MAX_TOTAL_DIFF_LINES_ENV, options.max_total_diff_lines)?;
+    options.max_estimated_tokens =
+        env_value(MAX_ESTIMATED_TOKENS_ENV, options.max_estimated_tokens)?;
+    options.timeout_ms = env_value(TIMEOUT_MS_ENV, options.timeout_ms)?;
+    Ok(())
+}
+
+fn env_value<T>(name: &str, default: T) -> Result<T, String>
+where
+    T: std::str::FromStr,
+{
+    match env::var(name) {
+        Ok(value) => value
+            .parse()
+            .map_err(|_| format!("{name} must be an integer")),
+        Err(env::VarError::NotPresent) => Ok(default),
+        Err(env::VarError::NotUnicode(_)) => Err(format!("{name} must be valid Unicode")),
+    }
 }
 
 fn absolute_path(path: &Path) -> PathBuf {
@@ -288,17 +263,11 @@ mod tests {
 
     fn args() -> ReviewArgs {
         ReviewArgs {
-            path: PathBuf::from("."),
+            path: Some(PathBuf::from(".")),
             api_key: None,
             staged: false,
             unstaged: false,
             base: None,
-            diff_file: None,
-            max_file_bytes: 100,
-            max_total_diff_bytes: DEFAULT_MAX_TOTAL_DIFF_BYTES,
-            max_total_diff_lines: DEFAULT_MAX_TOTAL_DIFF_LINES,
-            max_estimated_tokens: DEFAULT_MAX_ESTIMATED_TOKENS,
-            timeout_ms: 1000,
             json: false,
         }
     }

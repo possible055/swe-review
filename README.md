@@ -11,7 +11,7 @@ files.
 
 | Command | Use when you want | Output |
 | --- | --- | --- |
-| `quick-review` | Broader review feedback | Free-form review text |
+| no subcommand | Broader review feedback | Free-form review text |
 | `extract-key` | Save or inspect local credentials | Masked or full key output |
 
 ## Setup
@@ -32,7 +32,7 @@ You can also provide a key directly:
 
 ```bash
 export WINDSURF_API_KEY="..."
-swe-review quick-review --path . --api-key "$WINDSURF_API_KEY"
+swe-review --path . --api-key "$WINDSURF_API_KEY"
 ```
 
 ## Basic Usage
@@ -40,31 +40,25 @@ swe-review quick-review --path . --api-key "$WINDSURF_API_KEY"
 Review current working tree changes:
 
 ```bash
-swe-review quick-review --path .
+swe-review --path .
 ```
 
 Review staged changes only:
 
 ```bash
-swe-review quick-review --path . --staged
+swe-review --path . --staged
 ```
 
 Review changes against a base branch:
 
 ```bash
-swe-review quick-review --path . --base main
-```
-
-Review an existing diff file:
-
-```bash
-swe-review quick-review --path . --diff-file changes.diff
+swe-review --path . --base main
 ```
 
 Print JSON:
 
 ```bash
-swe-review quick-review --path . --json
+swe-review --path . --json
 ```
 
 ## Review Options
@@ -72,31 +66,31 @@ swe-review quick-review --path . --json
 Choose a Quick Review model:
 
 ```bash
-swe-review quick-review --path . --model swe-check
+swe-review --path . --model swe-check
 ```
 
 Choose one diff source at a time:
 
 ```bash
-swe-review quick-review --path . --staged
-swe-review quick-review --path . --unstaged
-swe-review quick-review --path . --base main
-swe-review quick-review --path . --diff-file changes.diff
+swe-review --path . --staged
+swe-review --path . --unstaged
+swe-review --path . --base main
 ```
 
 If no diff source is selected, `swe-review` reviews the current working tree.
 
 ## Large Diffs
 
-Use limits when reviewing large repositories or generated-heavy changes:
+Large diff limits are controlled by environment variables. Defaults are suitable
+for normal local reviews.
 
-```bash
-swe-review quick-review --path . \
-  --max-file-bytes 1000000 \
-  --max-total-diff-bytes 512000 \
-  --max-total-diff-lines 12000 \
-  --max-estimated-tokens 120000
-```
+| Variable | Default | Use |
+| --- | ---: | --- |
+| `SWE_REVIEW_MAX_FILE_BYTES` | `1000000` | Skip changed files larger than this many bytes |
+| `SWE_REVIEW_MAX_TOTAL_DIFF_BYTES` | `512000` | Fail when the prepared diff exceeds this many bytes |
+| `SWE_REVIEW_MAX_TOTAL_DIFF_LINES` | `12000` | Fail when the prepared diff exceeds this many lines |
+| `SWE_REVIEW_MAX_ESTIMATED_TOKENS` | `120000` | Fail when the prepared prompt exceeds this many tokens |
+| `SWE_REVIEW_TIMEOUT_MS` | `120000` | HTTP request timeout in milliseconds |
 
 ## Credentials
 

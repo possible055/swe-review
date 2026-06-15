@@ -19,7 +19,19 @@ fn write_auth_db(path: &std::path::Path, key: &str) {
 }
 
 #[test]
-fn review_command_is_removed() {
+fn quick_review_command_is_removed() {
+    let output = Command::cargo_bin("swe-review")
+        .unwrap()
+        .args(["quick-review", "--help"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("quick-review"));
+}
+
+#[test]
+fn review_subcommand_is_removed() {
     let output = Command::cargo_bin("swe-review")
         .unwrap()
         .args(["review", "--help"])
@@ -31,10 +43,10 @@ fn review_command_is_removed() {
 }
 
 #[test]
-fn quick_review_help_is_native_only() {
+fn top_level_review_help_is_native_only() {
     let output = Command::cargo_bin("swe-review")
         .unwrap()
-        .args(["quick-review", "--help"])
+        .args(["--help"])
         .output()
         .unwrap();
 
@@ -42,26 +54,56 @@ fn quick_review_help_is_native_only() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("--model"));
     assert!(stdout.contains("--api-key"));
-    assert!(stdout.contains("--max-total-diff-bytes"));
+    assert!(!stdout.contains("--max-file-bytes"));
+    assert!(!stdout.contains("--max-total-diff-bytes"));
+    assert!(!stdout.contains("--max-total-diff-lines"));
+    assert!(!stdout.contains("--max-estimated-tokens"));
+    assert!(!stdout.contains("--timeout-ms"));
+    assert!(!stdout.contains("--diff-file"));
     assert!(!stdout.contains("SWE_REVIEW_API_KEY"));
     assert!(!stdout.contains("swegrep"));
     assert!(!stdout.contains("Devin CLI credentials"));
 }
 
 #[test]
-fn quick_review_rejects_conflicting_diff_sources() {
+fn review_rejects_conflicting_diff_sources() {
     let tmp = TempDir::new().unwrap();
     let output = Command::cargo_bin("swe-review")
         .unwrap()
-        .args(["quick-review", "--path"])
+        .args(["--path"])
         .arg(tmp.path())
-        .args(["--staged", "--diff-file", "changes.diff"])
+        .args(["--staged", "--base", "main"])
         .output()
         .unwrap();
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("mutually exclusive"));
+}
+
+#[test]
+fn review_rejects_invalid_env_limit() {
+    let tmp = TempDir::new().unwrap();
+    let output = Command::cargo_bin("swe-review")
+        .unwrap()
+        .args(["--path"])
+        .arg(tmp.path())
+        .env("SWE_REVIEW_MAX_TOTAL_DIFF_BYTES", "many")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("SWE_REVIEW_MAX_TOTAL_DIFF_BYTES"));
+}
+
+#[test]
+fn review_requires_path() {
+    let output = Command::cargo_bin("swe-review").unwrap().output().unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--path is required"));
 }
 
 #[test]
@@ -163,10 +205,7 @@ fn auth_command_is_removed() {
 
 #[test]
 fn cli_help_omits_legacy_credential_sources() {
-    for args in [
-        &["extract-key", "--help"][..],
-        &["quick-review", "--help"][..],
-    ] {
+    for args in [&["extract-key", "--help"][..], &["--help"][..]] {
         let output = Command::cargo_bin("swe-review")
             .unwrap()
             .args(args)
@@ -192,6 +231,8 @@ fn top_level_help_omits_review_command() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("quick-review"));
-    assert!(!stdout.contains("review [OPTIONS]"));
+    assert!(stdout.contains("--path"));
+    assert!(stdout.contains("extract-key"));
+    assert!(!stdout.contains("review       "));
+    assert!(!stdout.contains("quick-review"));
 }

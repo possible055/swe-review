@@ -22,7 +22,7 @@ The packaged executable is located next to this skill file:
 Run a review from the target repository root:
 
 ```sh
-./bin/swe-review quick-review --path <repo-path>
+./bin/swe-review --path <repo-path>
 ```
 
 Useful options:
@@ -30,10 +30,17 @@ Useful options:
 - `--staged`: review staged changes only.
 - `--unstaged`: review unstaged and untracked changes only.
 - `--base <ref>`: review the working tree against a base ref.
-- `--diff-file <file>`: review an existing unified diff file.
 - `--model <value>`: override Quick Review model selection; by default Quick Review uses the first discovered review model.
 - `--api-key <key>`: authenticate Quick Review without relying on `WINDSURF_API_KEY` or `swe-tools/config.json`.
 - `--json`: return a structured JSON report.
+
+Large diff limits and HTTP timeout are controlled by environment variables:
+
+- `SWE_REVIEW_MAX_FILE_BYTES`
+- `SWE_REVIEW_MAX_TOTAL_DIFF_BYTES`
+- `SWE_REVIEW_MAX_TOTAL_DIFF_LINES`
+- `SWE_REVIEW_MAX_ESTIMATED_TOKENS`
+- `SWE_REVIEW_TIMEOUT_MS`
 
 To extract local Devin credentials or local Windsurf/Devin database credentials
 into `swe-tools/config.json`:
