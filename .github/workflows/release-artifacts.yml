@@ -79,6 +79,9 @@ jobs:
         with:
           ref: ${{ matrix.version }}
 
+      - name: Install Rust components
+        run: rustup component add rustfmt clippy
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
