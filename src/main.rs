@@ -1,3 +1,3 @@
 fn main() {
-    std::process::exit(swe_review::cli::run());
+    std::process::exit(swe_review::run());
 }

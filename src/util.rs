@@ -18,12 +18,6 @@ pub fn progress(on_progress: Option<&(dyn Fn(&str) + Sync)>, message: &str) {
     }
 }
 
-pub fn build_review_runtime() -> std::io::Result<tokio::runtime::Runtime> {
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

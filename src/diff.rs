@@ -11,6 +11,7 @@ pub enum DiffSource {
     Staged,
     Unstaged,
     Base(String),
+    #[allow(dead_code)]
     DiffFile(PathBuf),
 }
 

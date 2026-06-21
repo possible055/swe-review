@@ -1,72 +1,69 @@
 use super::client::NativeError;
 use crate::protobuf::{gzip_compress, gzip_decompress};
-use reqwest::header::{CONTENT_ENCODING, HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
-use std::time::Duration;
 
 const CONNECT_GZIP_FLAG: u8 = 0x01;
 const CONNECT_END_STREAM_FLAG: u8 = 0x02;
 
-pub(super) async fn post(
-    client: &reqwest::Client,
-    url: &str,
-    body: Vec<u8>,
-    timeout_ms: u64,
-) -> Result<Vec<u8>, NativeError> {
-    let headers = header_map(&[
-        ("Content-Type", "application/proto".to_string()),
-        ("Connect-Protocol-Version", "1".to_string()),
-        ("User-Agent", "connect-go/1.18.1 (go1.25.5)".to_string()),
-        ("Accept-Encoding", "gzip".to_string()),
-    ]);
-    send_post(client, url, body, headers, timeout_ms).await
+pub(super) fn post(client: &ureq::Agent, url: &str, body: Vec<u8>) -> Result<Vec<u8>, NativeError> {
+    send_post(
+        client,
+        url,
+        body,
+        &[
+            ("Content-Type", "application/proto"),
+            ("Connect-Protocol-Version", "1"),
+            ("User-Agent", "connect-go/1.18.1 (go1.25.5)"),
+            ("Accept-Encoding", "gzip"),
+        ],
+    )
 }
 
-pub(super) async fn post_connect_stream(
-    client: &reqwest::Client,
+pub(super) fn post_connect_stream(
+    client: &ureq::Agent,
     url: &str,
     body: Vec<u8>,
-    timeout_ms: u64,
 ) -> Result<Vec<Vec<u8>>, NativeError> {
-    let headers = header_map(&[
-        ("Content-Type", "application/connect+proto".to_string()),
-        ("Connect-Protocol-Version", "1".to_string()),
-        ("Connect-Content-Encoding", "gzip".to_string()),
-        ("Connect-Accept-Encoding", "gzip".to_string()),
-        ("User-Agent", "connect-go/1.18.1 (go1.25.5)".to_string()),
-        ("Accept-Encoding", "gzip".to_string()),
-    ]);
     let framed = frame_connect_stream(&body)?;
-    let bytes = send_post(client, url, framed, headers, timeout_ms).await?;
+    let bytes = send_post(
+        client,
+        url,
+        framed,
+        &[
+            ("Content-Type", "application/connect+proto"),
+            ("Connect-Protocol-Version", "1"),
+            ("Connect-Content-Encoding", "gzip"),
+            ("Connect-Accept-Encoding", "gzip"),
+            ("User-Agent", "connect-go/1.18.1 (go1.25.5)"),
+            ("Accept-Encoding", "gzip"),
+        ],
+    )?;
     parse_connect_stream_response(&bytes)
 }
 
-async fn send_post(
-    client: &reqwest::Client,
+fn send_post(
+    client: &ureq::Agent,
     url: &str,
     body: Vec<u8>,
-    headers: HeaderMap,
-    timeout_ms: u64,
+    headers: &[(&str, &str)],
 ) -> Result<Vec<u8>, NativeError> {
-    let response = client
-        .post(url)
-        .headers(headers)
-        .body(body)
-        .timeout(Duration::from_millis(timeout_ms))
-        .send()
-        .await
+    let mut request = client.post(url);
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let mut response = request
+        .send(body)
         .map_err(|err| NativeError::Network(err.to_string()))?;
     let status = response.status();
     let encoding = response
         .headers()
-        .get(CONTENT_ENCODING)
+        .get("content-encoding")
         .and_then(|value| value.to_str().ok())
         .map(str::to_ascii_lowercase);
     let bytes = response
-        .bytes()
-        .await
-        .map_err(|err| NativeError::Network(err.to_string()))?
-        .to_vec();
+        .body_mut()
+        .read_to_vec()
+        .map_err(|err| NativeError::Network(err.to_string()))?;
     if !status.is_success() {
         return Err(NativeError::Http {
             status: status.as_u16(),
@@ -77,19 +74,6 @@ async fn send_post(
         return gzip_decompress(&bytes).map_err(|err| NativeError::Network(err.to_string()));
     }
     Ok(bytes)
-}
-
-fn header_map(headers: &[(&str, String)]) -> HeaderMap {
-    let mut map = HeaderMap::new();
-    for (name, value) in headers {
-        if let (Ok(name), Ok(value)) = (
-            HeaderName::from_bytes(name.as_bytes()),
-            HeaderValue::from_str(value),
-        ) {
-            map.insert(name, value);
-        }
-    }
-    map
 }
 
 fn frame_connect_stream(body: &[u8]) -> Result<Vec<u8>, NativeError> {

@@ -6,7 +6,7 @@ use super::transport::{post, post_connect_stream};
 use crate::protobuf::ProtobufEncoder;
 use serde::Serialize;
 use std::env;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -101,8 +101,7 @@ pub struct NativeClient {
     api_base: String,
     auth_base: String,
     seat_management_base: String,
-    timeout_ms: u64,
-    client: reqwest::Client,
+    client: ureq::Agent,
     jwt: Option<String>,
     identity: NativeClientIdentity,
 }
@@ -113,49 +112,46 @@ impl NativeClient {
             .api_key
             .filter(|key| !key.trim().is_empty())
             .ok_or(NativeError::ApiKeyMissing)?;
-        let client = reqwest::Client::builder()
+        let client = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_millis(options.timeout_ms)))
+            .http_status_as_error(false)
             .build()
-            .map_err(|err| NativeError::Network(err.to_string()))?;
+            .new_agent();
 
         Ok(Self {
             api_key,
             api_base: service_url(DEFAULT_API_SERVER_URL, API_SERVER_SERVICE),
             auth_base: service_url(DEFAULT_API_SERVER_URL, AUTH_SERVICE),
             seat_management_base: service_url(DEFAULT_API_SERVER_URL, SEAT_MANAGEMENT_SERVICE),
-            timeout_ms: options.timeout_ms,
             client,
             jwt: None,
             identity: options.identity,
         })
     }
 
-    pub async fn get_cli_model_configs(&mut self) -> Result<Vec<NativeModelConfig>, NativeError> {
-        let metadata = self.jwt_metadata().await?;
+    pub fn get_cli_model_configs(&mut self) -> Result<Vec<NativeModelConfig>, NativeError> {
+        let metadata = self.jwt_metadata()?;
         let mut request = ProtobufEncoder::new();
         request.write_bytes(1, &metadata);
-        let response = self
-            .post(
-                &format!("{}/GetCliModelConfigs", self.api_base),
-                request.to_bytes(),
-            )
-            .await?;
+        let response = self.post(
+            &format!("{}/GetCliModelConfigs", self.api_base),
+            request.to_bytes(),
+        )?;
         Ok(parse_cli_model_configs(&response))
     }
 
-    pub async fn get_cli_team_settings(&mut self) -> Result<NativeTeamSettings, NativeError> {
-        let metadata = self.jwt_metadata().await?;
+    pub fn get_cli_team_settings(&mut self) -> Result<NativeTeamSettings, NativeError> {
+        let metadata = self.jwt_metadata()?;
         let mut request = ProtobufEncoder::new();
         request.write_bytes(1, &metadata);
-        let response = self
-            .post(
-                &format!("{}/GetCliTeamSettings", self.seat_management_base),
-                request.to_bytes(),
-            )
-            .await?;
+        let response = self.post(
+            &format!("{}/GetCliTeamSettings", self.seat_management_base),
+            request.to_bytes(),
+        )?;
         Ok(parse_cli_team_settings(&response))
     }
 
-    pub async fn get_chat_message(
+    pub fn get_chat_message(
         &mut self,
         request: NativeChatRequest<'_>,
     ) -> Result<NativeChatResponse, NativeError> {
@@ -163,11 +159,10 @@ impl NativeClient {
         let cascade_id = Uuid::new_v4().to_string();
         let prompt_id = Uuid::new_v4().to_string();
         let trigger_id = Uuid::new_v4().to_string();
-        let metadata = self.cloud_metadata(&session_id, &trigger_id).await?;
+        let metadata = self.cloud_metadata(&session_id, &trigger_id)?;
         let body = encode_get_chat_message_request(&metadata, request, &cascade_id, &prompt_id);
-        let frames = self
-            .post_connect_stream(&format!("{}/GetChatMessage", self.api_base), body)
-            .await?;
+        let frames =
+            self.post_connect_stream(&format!("{}/GetChatMessage", self.api_base), body)?;
         let text = parse_get_chat_message_frames(&frames);
         if text.trim().is_empty() {
             return Err(NativeError::Decode("GetChatMessageResponse.delta_text"));
@@ -180,8 +175,8 @@ impl NativeClient {
         })
     }
 
-    async fn jwt_metadata(&mut self) -> Result<Vec<u8>, NativeError> {
-        let jwt = self.jwt().await?;
+    fn jwt_metadata(&mut self) -> Result<Vec<u8>, NativeError> {
+        let jwt = self.jwt()?;
         let mut metadata = ProtobufEncoder::new();
         metadata.write_string(1, WS_APP);
         metadata.write_string(2, &self.identity.windsurf_extension_version);
@@ -194,12 +189,12 @@ impl NativeClient {
         Ok(metadata.to_bytes())
     }
 
-    async fn cloud_metadata(
+    fn cloud_metadata(
         &mut self,
         session_id: &str,
         trigger_id: &str,
     ) -> Result<Vec<u8>, NativeError> {
-        let jwt = self.jwt().await?;
+        let jwt = self.jwt()?;
         let mut metadata = ProtobufEncoder::new();
         metadata.write_string(1, WS_APP);
         metadata.write_string(2, &self.identity.cloud_version);
@@ -218,7 +213,7 @@ impl NativeClient {
         Ok(metadata.to_bytes())
     }
 
-    async fn jwt(&mut self) -> Result<String, NativeError> {
+    fn jwt(&mut self) -> Result<String, NativeError> {
         if let Some(jwt) = &self.jwt
             && jwt_expires_at(jwt) > now_seconds() + 60.0
         {
@@ -236,9 +231,7 @@ impl NativeClient {
 
         let mut outer = ProtobufEncoder::new();
         outer.write_message(1, &metadata);
-        let response = self
-            .post(&format!("{}/GetUserJwt", self.auth_base), outer.to_bytes())
-            .await?;
+        let response = self.post(&format!("{}/GetUserJwt", self.auth_base), outer.to_bytes())?;
         let jwt = crate::protobuf::extract_strings(&response)
             .into_iter()
             .find(|value| value.starts_with("eyJ") && value.contains('.'))
@@ -247,16 +240,12 @@ impl NativeClient {
         Ok(jwt)
     }
 
-    async fn post(&self, url: &str, body: Vec<u8>) -> Result<Vec<u8>, NativeError> {
-        post(&self.client, url, body, self.timeout_ms).await
+    fn post(&self, url: &str, body: Vec<u8>) -> Result<Vec<u8>, NativeError> {
+        post(&self.client, url, body)
     }
 
-    async fn post_connect_stream(
-        &self,
-        url: &str,
-        body: Vec<u8>,
-    ) -> Result<Vec<Vec<u8>>, NativeError> {
-        post_connect_stream(&self.client, url, body, self.timeout_ms).await
+    fn post_connect_stream(&self, url: &str, body: Vec<u8>) -> Result<Vec<Vec<u8>>, NativeError> {
+        post_connect_stream(&self.client, url, body)
     }
 }
 

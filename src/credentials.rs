@@ -1,11 +1,13 @@
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
-use serde_json::{Value, json};
-use std::env;
+mod auth_db;
+mod config;
+mod devin;
+mod resolve;
+
+pub use config::write_swe_tools_config_api_key;
+pub use resolve::resolve_api_key;
+
 use std::fmt;
-use std::fs;
 use std::io;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -13,7 +15,6 @@ pub const CONFIG_KEY: &str = "WINDSURF_API_KEY";
 const WINDSURF_AUTH_STATUS_KEY: &str = "windsurfAuthStatus";
 const WINDSURF_API_KEY_FIELD: &str = "apiKey";
 const SESSION_TOKEN_PREFIX: &str = "devin-session-token$";
-const AUTH_DB_APP_NAMES: &[&str] = &["Devin - Next", "devin", "Windsurf"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedApiKey {
@@ -81,8 +82,12 @@ impl ExtractKeyResult {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolveApiKeyError {
+    #[allow(dead_code)]
     Config(String),
-    ExtractKey { error: String, hint: Option<String> },
+    ExtractKey {
+        error: String,
+        hint: Option<String>,
+    },
 }
 
 impl fmt::Display for ResolveApiKeyError {
@@ -118,56 +123,6 @@ pub enum CredentialsError {
     },
 }
 
-pub fn resolve_api_key(explicit: Option<String>) -> Result<ResolvedApiKey, ResolveApiKeyError> {
-    resolve_api_key_with_extractor(explicit, || extract_key(None))
-}
-
-fn resolve_api_key_with_extractor(
-    explicit: Option<String>,
-    extract: impl FnOnce() -> ExtractKeyResult,
-) -> Result<ResolvedApiKey, ResolveApiKeyError> {
-    if let Some(value) = non_empty(explicit) {
-        return Ok(resolved(value, ApiKeySource::Explicit));
-    }
-
-    if let Some(value) = env::var("WINDSURF_API_KEY")
-        .ok()
-        .and_then(|value| non_empty(Some(value)))
-    {
-        return Ok(resolved(value, ApiKeySource::Env("WINDSURF_API_KEY")));
-    }
-
-    match swe_tools_config_api_key() {
-        Ok(Some((value, path))) => return Ok(resolved(value, ApiKeySource::Config(path))),
-        Ok(None) => {}
-        Err(error) => {
-            eprintln!(
-                "Warning: failed to read swe-tools config; falling back to credential extraction: {error}"
-            );
-        }
-    }
-
-    let result = extract();
-    match result.api_key {
-        Some(value) => {
-            let path = PathBuf::from(result.db_path);
-            Ok(resolved(value, ApiKeySource::AuthDb(path)))
-        }
-        None => Err(ResolveApiKeyError::ExtractKey {
-            error: result
-                .error
-                .unwrap_or_else(|| "apiKey field is empty".to_string()),
-            hint: result.hint,
-        }),
-    }
-}
-
-pub fn write_swe_tools_config_api_key(api_key: &str) -> Result<PathBuf, CredentialsError> {
-    let path = get_config_path().ok_or(CredentialsError::ConfigPathMissing)?;
-    write_swe_tools_config_api_key_to(&path, api_key)?;
-    Ok(path)
-}
-
 pub fn classify_api_key(value: &str) -> &'static str {
     if value.starts_with("sk-") {
         return "standard";
@@ -195,21 +150,26 @@ pub fn mask_api_key(key: &str) -> String {
 
 pub fn extract_key(db_path: Option<&Path>) -> ExtractKeyResult {
     if let Some(path) = db_path {
-        return extract_key_from_path(path);
+        return auth_db::extract_key_from_path(path);
     }
 
-    let credentials = extract_key_from_devin_credentials_candidates();
+    let credentials = devin::extract_key_from_devin_credentials_candidates();
     if credentials.api_key.is_some() {
         return credentials;
     }
 
-    let candidates = match auth_db_path_candidates() {
+    let candidates = match auth_db::auth_db_path_candidates() {
         Ok(paths) => paths,
         Err(err) => {
             return ExtractKeyResult::error(format!("Cannot determine database path: {err}"), "");
         }
     };
-    extract_key_from_candidates(&candidates)
+    auth_db::extract_key_from_candidates(&candidates)
+}
+
+#[allow(dead_code)]
+pub fn get_config_path() -> Option<PathBuf> {
+    config::get_config_path()
 }
 
 fn resolved(value: String, source: ApiKeySource) -> ResolvedApiKey {
@@ -226,390 +186,6 @@ fn non_empty(value: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn swe_tools_config_api_key() -> Result<Option<(String, PathBuf)>, CredentialsError> {
-    let Some(path) = get_config_path() else {
-        return Ok(None);
-    };
-    let text = match fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => {
-            return Err(CredentialsError::Read {
-                path: path.clone(),
-                source,
-            });
-        }
-    };
-    let value: Value = serde_json::from_str(&text).map_err(|source| CredentialsError::Json {
-        path: path.clone(),
-        source,
-    })?;
-    Ok(value
-        .get(CONFIG_KEY)
-        .and_then(|value| value.as_str())
-        .and_then(|value| non_empty(Some(value.to_string())))
-        .map(|value| (value, path)))
-}
-
-fn write_swe_tools_config_api_key_to(path: &Path, api_key: &str) -> Result<(), CredentialsError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|source| CredentialsError::Write {
-            path: parent.to_path_buf(),
-            source,
-        })?;
-    }
-    let text = serde_json::to_string_pretty(&json!({ CONFIG_KEY: api_key })).map_err(|source| {
-        CredentialsError::Json {
-            path: path.to_path_buf(),
-            source,
-        }
-    })?;
-    fs::write(path, format!("{text}\n")).map_err(|source| CredentialsError::Write {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    #[cfg(unix)]
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|source| {
-        CredentialsError::Write {
-            path: path.to_path_buf(),
-            source,
-        }
-    })?;
-    Ok(())
-}
-
-pub fn get_config_path() -> Option<PathBuf> {
-    swe_tools_config_path_for(
-        ConfigPlatform::current(),
-        env::var_os("APPDATA"),
-        env::var_os("XDG_CONFIG_HOME"),
-        env::var_os("HOME"),
-    )
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConfigPlatform {
-    Windows,
-    Unix,
-}
-
-impl ConfigPlatform {
-    fn current() -> Self {
-        if cfg!(windows) {
-            Self::Windows
-        } else {
-            Self::Unix
-        }
-    }
-}
-
-fn swe_tools_config_path_for(
-    platform: ConfigPlatform,
-    appdata: Option<impl Into<PathBuf>>,
-    xdg_config_home: Option<impl Into<PathBuf>>,
-    home: Option<impl Into<PathBuf>>,
-) -> Option<PathBuf> {
-    match platform {
-        ConfigPlatform::Windows => appdata
-            .map(Into::into)
-            .filter(|path: &PathBuf| !path.as_os_str().is_empty())
-            .map(|path| path.join("swe-tools").join("config.json")),
-        ConfigPlatform::Unix => xdg_config_home
-            .map(Into::into)
-            .filter(|path: &PathBuf| !path.as_os_str().is_empty())
-            .or_else(|| {
-                home.map(Into::into)
-                    .filter(|path: &PathBuf| !path.as_os_str().is_empty())
-                    .map(|path: PathBuf| path.join(".config"))
-            })
-            .map(|path| path.join("swe-tools").join("config.json")),
-    }
-}
-
-fn auth_db_path(base: &Path, app_name: &str) -> PathBuf {
-    base.join(app_name)
-        .join("User")
-        .join("globalStorage")
-        .join("state.vscdb")
-}
-
-fn push_auth_db_path_candidates(candidates: &mut Vec<PathBuf>, base: &Path) {
-    for app_name in AUTH_DB_APP_NAMES {
-        candidates.push(auth_db_path(base, app_name));
-    }
-}
-
-/// `AppData/Roaming` directories for every non-hidden user profile discovered under
-/// `/mnt/c/Users`. Returns an empty list when the host is not WSL or the directory
-/// is unreadable, so callers on macOS/Windows/other Linux hosts pay no cost.
-fn windows_wsl_roaming_dirs() -> Vec<PathBuf> {
-    let c_users = Path::new("/mnt/c/Users");
-    if !c_users.exists() {
-        return Vec::new();
-    }
-    let Ok(users) = fs::read_dir(c_users) else {
-        return Vec::new();
-    };
-    let mut dirs = Vec::new();
-    for entry in users.flatten() {
-        let user_dir = entry.path();
-        if !user_dir.is_dir() {
-            continue;
-        }
-        let Some(name) = user_dir.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if name.starts_with('.') {
-            continue;
-        }
-        dirs.push(user_dir.join("AppData").join("Roaming"));
-    }
-    dirs
-}
-
-fn devin_credentials_path_candidates() -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-
-    if cfg!(windows) {
-        if let Some(appdata) = env::var_os("APPDATA") {
-            candidates.push(
-                PathBuf::from(appdata)
-                    .join("devin")
-                    .join("credentials.toml"),
-            );
-        }
-        return candidates;
-    }
-
-    if let Some(home) = env::var_os("HOME") {
-        candidates.push(
-            PathBuf::from(home)
-                .join(".config")
-                .join("devin")
-                .join("credentials.toml"),
-        );
-    }
-
-    for roaming in windows_wsl_roaming_dirs() {
-        candidates.push(roaming.join("devin").join("credentials.toml"));
-    }
-
-    candidates
-}
-
-fn extract_key_from_devin_credentials_candidates() -> ExtractKeyResult {
-    let candidates = devin_credentials_path_candidates();
-    let mut attempted = Vec::new();
-    let mut first_error = None;
-
-    for path in candidates {
-        if !path.exists() {
-            attempted.push(path.to_string_lossy().into_owned());
-            continue;
-        }
-
-        let result = extract_key_from_devin_credentials_path(&path);
-        if result.api_key.is_some() {
-            return result;
-        }
-        if first_error.is_none() {
-            first_error = result.error.clone();
-        }
-        attempted.push(path.to_string_lossy().into_owned());
-    }
-
-    if let Some(error) = first_error {
-        return ExtractKeyResult::error_with_hint(
-            error,
-            format!("Checked Devin credentials: {}", attempted.join(", ")),
-            attempted.first().cloned().unwrap_or_default(),
-        );
-    }
-
-    let fallback = attempted.first().cloned().unwrap_or_default();
-    ExtractKeyResult::error_with_hint(
-        "Devin credentials.toml not found",
-        format!("Checked Devin credentials: {}", attempted.join(", ")),
-        fallback,
-    )
-}
-
-fn extract_key_from_devin_credentials_path(path: &Path) -> ExtractKeyResult {
-    let text = match fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(error) => {
-            return ExtractKeyResult::error(
-                format!("Failed to read Devin credentials: {error}"),
-                path.to_string_lossy(),
-            );
-        }
-    };
-
-    let api_key = match parse_devin_credentials_api_key(&text) {
-        Ok(Some(api_key)) => api_key,
-        Ok(None) => {
-            return ExtractKeyResult::error(
-                "windsurf_api_key field not found in Devin credentials",
-                path.to_string_lossy(),
-            );
-        }
-        Err(error) => {
-            return ExtractKeyResult::error(
-                format!("Failed to parse Devin credentials: {error}"),
-                path.to_string_lossy(),
-            );
-        }
-    };
-
-    ExtractKeyResult::success(api_key, path, "Source credentials")
-}
-
-fn parse_devin_credentials_api_key(text: &str) -> Result<Option<String>, toml::de::Error> {
-    let data: toml::Value = toml::from_str(text)?;
-    Ok(data
-        .get("windsurf_api_key")
-        .and_then(|value| value.as_str())
-        .and_then(|value| non_empty(Some(value.to_string()))))
-}
-
-fn auth_db_path_candidates() -> Result<Vec<PathBuf>, String> {
-    let home = env::var_os("HOME").map(PathBuf::from);
-
-    if cfg!(target_os = "macos") {
-        let home = home.ok_or("Cannot determine HOME path")?;
-        let app_support = home.join("Library").join("Application Support");
-        let mut candidates = Vec::new();
-        push_auth_db_path_candidates(&mut candidates, &app_support);
-        return Ok(candidates);
-    }
-
-    if cfg!(target_os = "windows") {
-        let appdata = env::var_os("APPDATA").ok_or("Cannot determine APPDATA path")?;
-        let appdata = PathBuf::from(appdata);
-        let mut candidates = Vec::new();
-        push_auth_db_path_candidates(&mut candidates, &appdata);
-        return Ok(candidates);
-    }
-
-    let mut candidates = Vec::new();
-    for roaming in windows_wsl_roaming_dirs() {
-        push_auth_db_path_candidates(&mut candidates, &roaming);
-    }
-
-    let config_dir = env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| home.map(|path| path.join(".config")))
-        .ok_or("Cannot determine HOME path")?;
-    push_auth_db_path_candidates(&mut candidates, &config_dir);
-    Ok(candidates)
-}
-
-fn extract_key_from_candidates(candidates: &[PathBuf]) -> ExtractKeyResult {
-    let mut attempted = Vec::new();
-    let mut first_error = None;
-    for path in candidates {
-        if !path.exists() {
-            attempted.push(path.to_string_lossy().into_owned());
-            continue;
-        }
-        let result = extract_key_from_path(path);
-        if result.api_key.is_some() {
-            return result;
-        }
-        if first_error.is_none() {
-            first_error = result.error.clone();
-        }
-        attempted.push(path.to_string_lossy().into_owned());
-    }
-
-    if let Some(error) = first_error {
-        return ExtractKeyResult::error_with_hint(
-            error,
-            format!("Checked auth databases: {}", attempted.join(", ")),
-            attempted.first().cloned().unwrap_or_default(),
-        );
-    }
-
-    let fallback = candidates.first().cloned().unwrap_or_default();
-    ExtractKeyResult::error_with_hint(
-        format!("Auth database not found: {}", fallback.display()),
-        format!("Checked auth databases: {}", attempted.join(", ")),
-        fallback.to_string_lossy(),
-    )
-}
-
-fn extract_key_from_path(path: &Path) -> ExtractKeyResult {
-    if !path.exists() {
-        return ExtractKeyResult::error_with_hint(
-            format!("Auth database not found: {}", path.display()),
-            "Ensure Windsurf or Devin is installed and logged in.",
-            path.to_string_lossy(),
-        );
-    }
-
-    let conn = match Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
-        Ok(conn) => conn,
-        Err(_) => match Connection::open(path) {
-            Ok(conn) => conn,
-            Err(err) => {
-                return ExtractKeyResult::error(
-                    format!("Failed to open database: {err}"),
-                    path.to_string_lossy(),
-                );
-            }
-        },
-    };
-
-    extract_key_from_connection(&conn, path)
-        .unwrap_or_else(|err| ExtractKeyResult::error(err, path.to_string_lossy()))
-}
-
-fn extract_key_from_connection(conn: &Connection, path: &Path) -> Result<ExtractKeyResult, String> {
-    let value: Option<String> = conn
-        .query_row(
-            "SELECT value FROM ItemTable WHERE key = ?",
-            [WINDSURF_AUTH_STATUS_KEY],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|err| format!("Extraction failed: {err}"))?;
-
-    let Some(value) = value else {
-        return Ok(ExtractKeyResult::error_with_hint(
-            "windsurfAuthStatus record not found",
-            "Ensure Windsurf is logged in.",
-            path.to_string_lossy(),
-        ));
-    };
-
-    let data: Value = serde_json::from_str(&value)
-        .map_err(|_| "windsurfAuthStatus data parse failed".to_string())?;
-    let Some(api_key_value) = data.get(WINDSURF_API_KEY_FIELD) else {
-        return Ok(ExtractKeyResult::error(
-            "apiKey field is empty",
-            path.to_string_lossy(),
-        ));
-    };
-    let Some(api_key) = api_key_value.as_str() else {
-        return Ok(ExtractKeyResult::error(
-            "apiKey field is not a string",
-            path.to_string_lossy(),
-        ));
-    };
-    if api_key.is_empty() {
-        return Ok(ExtractKeyResult::error(
-            "apiKey field is empty",
-            path.to_string_lossy(),
-        ));
-    }
-
-    Ok(ExtractKeyResult::success(
-        api_key.to_string(),
-        path,
-        "Source DB",
-    ))
-}
-
 impl fmt::Display for ApiKeySource {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -624,8 +200,11 @@ impl fmt::Display for ApiKeySource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusqlite::params;
-    use serde_json::json;
+    use rusqlite::{Connection, params};
+    use serde_json::{Value, json};
+    use std::env;
+    use std::fs;
+    use std::path::Path;
     use std::sync::{Mutex, MutexGuard};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -735,7 +314,7 @@ mod tests {
         let _guard = clear_key_env();
         let db_path = PathBuf::from("/tmp/state.vscdb");
 
-        let resolved = resolve_api_key_with_extractor(None, || ExtractKeyResult {
+        let resolved = resolve::resolve_api_key_with_extractor(None, || ExtractKeyResult {
             api_key: Some("sk-ws-01-discovered".to_string()),
             error: None,
             hint: None,
@@ -763,7 +342,7 @@ mod tests {
         fs::write(&config_path, "{not-json").unwrap();
         unsafe { env::set_var("HOME", temp.path()) };
 
-        let resolved = resolve_api_key_with_extractor(None, || ExtractKeyResult {
+        let resolved = resolve::resolve_api_key_with_extractor(None, || ExtractKeyResult {
             api_key: Some("sk-ws-01-fallback".to_string()),
             error: None,
             hint: None,
@@ -781,7 +360,7 @@ mod tests {
     fn extract_key_failure_is_reported_when_key_sources_are_missing() {
         let _guard = clear_key_env();
 
-        let error = resolve_api_key_with_extractor(None, || {
+        let error = resolve::resolve_api_key_with_extractor(None, || {
             ExtractKeyResult::error_with_hint(
                 "Auth database not found: /tmp/state.vscdb",
                 "Ensure Windsurf or Devin is installed and logged in.",
@@ -809,7 +388,7 @@ mod tests {
         fs::write(&config_path, r#"{"WINDSURF_API_KEY":"legacy-key"}"#).unwrap();
         unsafe { env::set_var("HOME", temp.path()) };
 
-        let result = resolve_api_key_with_extractor(None, || {
+        let result = resolve::resolve_api_key_with_extractor(None, || {
             ExtractKeyResult::error("Auth database not found", "")
         });
 
@@ -821,7 +400,7 @@ mod tests {
         let _guard = clear_key_env();
         unsafe { env::set_var("SWE_REVIEW_API_KEY", "legacy-key") };
 
-        let result = resolve_api_key_with_extractor(None, || {
+        let result = resolve::resolve_api_key_with_extractor(None, || {
             ExtractKeyResult::error("Auth database not found", "")
         });
 
@@ -830,8 +409,8 @@ mod tests {
 
     #[test]
     fn linux_config_path_prefers_xdg_config_home() {
-        let path = swe_tools_config_path_for(
-            ConfigPlatform::Unix,
+        let path = config::swe_tools_config_path_for(
+            config::ConfigPlatform::Unix,
             None::<PathBuf>,
             Some(PathBuf::from("/tmp/xdg")),
             Some(PathBuf::from("/home/alice")),
@@ -843,8 +422,8 @@ mod tests {
 
     #[test]
     fn linux_config_path_falls_back_to_home_config() {
-        let path = swe_tools_config_path_for(
-            ConfigPlatform::Unix,
+        let path = config::swe_tools_config_path_for(
+            config::ConfigPlatform::Unix,
             None::<PathBuf>,
             None::<PathBuf>,
             Some(PathBuf::from("/home/alice")),
@@ -859,8 +438,8 @@ mod tests {
 
     #[test]
     fn windows_config_path_uses_appdata() {
-        let path = swe_tools_config_path_for(
-            ConfigPlatform::Windows,
+        let path = config::swe_tools_config_path_for(
+            config::ConfigPlatform::Windows,
             Some(PathBuf::from(r"C:\Users\Alice\AppData\Roaming")),
             None::<PathBuf>,
             Some(PathBuf::from("/home/alice")),
@@ -889,7 +468,7 @@ mod tests {
         let base = PathBuf::from(r"C:\Users\Alice\AppData\Roaming");
         let mut candidates = Vec::new();
 
-        push_auth_db_path_candidates(&mut candidates, &base);
+        auth_db::push_auth_db_path_candidates(&mut candidates, &base);
 
         assert_eq!(
             candidates,
@@ -954,7 +533,9 @@ mod tests {
         "#;
 
         assert_eq!(
-            parse_devin_credentials_api_key(text).unwrap().as_deref(),
+            devin::parse_devin_credentials_api_key(text)
+                .unwrap()
+                .as_deref(),
             Some("sk-ws-01-escaped-key")
         );
     }
@@ -989,7 +570,8 @@ mod tests {
             json!({ "apiKey": "devin-session-token$eyJhbGciOiJIUzI1NiJ9.payload.signature" }),
         );
 
-        let result = extract_key_from_candidates(&[windsurf_db_path, devin_db_path.clone()]);
+        let result =
+            auth_db::extract_key_from_candidates(&[windsurf_db_path, devin_db_path.clone()]);
 
         assert_eq!(
             result.api_key.as_deref(),

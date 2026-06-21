@@ -60,8 +60,6 @@ pub enum QuickReviewError {
     NoChanges,
     #[error(transparent)]
     Native(#[from] NativeError),
-    #[error("Failed to start async runtime: {0}")]
-    Runtime(String),
 }
 
 pub fn run_quick_review(
@@ -99,8 +97,6 @@ fn run_quick_review_native(
         on_progress,
         "Discovering Quick Review models via native API",
     );
-    let runtime = crate::util::build_review_runtime()
-        .map_err(|error| QuickReviewError::Runtime(error.to_string()))?;
     let ReviewDiff {
         text,
         files,
@@ -111,61 +107,57 @@ fn run_quick_review_native(
     let review_prompt = native_quick_review_prompt(&text);
     enforce_prompt_token_budget(&review_prompt, options.review.max_estimated_tokens)?;
 
-    let (model, response) = runtime.block_on(async {
-        let api_key = resolve_api_key(options.review.api_key.clone()).map_err(|error| {
-            NativeError::ApiKey(format!("Unable to resolve Windsurf API key: {error}"))
-        })?;
-        let is_session_token = api_key.is_session_token;
+    let api_key = resolve_api_key(options.review.api_key.clone()).map_err(|error| {
+        NativeError::ApiKey(format!("Unable to resolve Windsurf API key: {error}"))
+    })?;
+    let is_session_token = api_key.is_session_token;
 
-        let mut client = NativeClient::new(NativeClientOptions {
-            api_key: Some(api_key.value),
-            timeout_ms: options.review.timeout_ms,
-            identity: NativeClientIdentity::default(),
-        })?;
-        let (models, team_settings) = discover_quick_review_catalog(&mut client, on_progress).await;
-        let native_candidates =
-            quick_review_models_from_native(&models, &team_settings.allowed_model_uids);
+    let mut client = NativeClient::new(NativeClientOptions {
+        api_key: Some(api_key.value),
+        timeout_ms: options.review.timeout_ms,
+        identity: NativeClientIdentity::default(),
+    })?;
+    let (models, team_settings) = discover_quick_review_catalog(&mut client, on_progress);
+    let native_candidates =
+        quick_review_models_from_native(&models, &team_settings.allowed_model_uids);
+    progress(
+        on_progress,
+        &format!(
+            "Quick Review catalog has {} eligible model(s)",
+            native_candidates.len()
+        ),
+    );
+    let candidates = if native_candidates.is_empty() {
+        let fallback = fallback_quick_review_models();
         progress(
             on_progress,
             &format!(
-                "Quick Review catalog has {} eligible model(s)",
-                native_candidates.len()
+                "Using {} known Quick Review model option(s)",
+                fallback.len()
             ),
         );
-        let candidates = if native_candidates.is_empty() {
-            let fallback = fallback_quick_review_models();
-            progress(
-                on_progress,
-                &format!(
-                    "Using {} known Quick Review model option(s)",
-                    fallback.len()
-                ),
-            );
-            fallback
-        } else {
-            native_candidates
-        };
-        let model = select_quick_review_model_from_candidates(
-            &candidates,
-            options.model.as_deref(),
-            !models.is_empty(),
-        );
-        progress(on_progress, "Sending Quick Review prompt via native API");
-        let response = client
-            .get_chat_message(NativeChatRequest {
-                model_uid: &model.value,
-                prompt: &review_prompt,
-            })
-            .await
-            .map_err(|err| {
-                if is_session_token && err.to_string().contains("permission_denied") {
-                    QuickReviewError::Native(NativeError::SessionTokenNotAllowed)
-                } else {
-                    err.into()
-                }
-            })?;
-        Ok::<_, QuickReviewError>((model, response))
-    })?;
+        fallback
+    } else {
+        native_candidates
+    };
+    let model = select_quick_review_model_from_candidates(
+        &candidates,
+        options.model.as_deref(),
+        !models.is_empty(),
+    );
+    progress(on_progress, "Sending Quick Review prompt via native API");
+    let response = client
+        .get_chat_message(NativeChatRequest {
+            model_uid: &model.value,
+            prompt: &review_prompt,
+        })
+        .map_err(|err| {
+            if is_session_token && err.to_string().contains("permission_denied") {
+                QuickReviewError::Native(NativeError::SessionTokenNotAllowed)
+            } else {
+                err.into()
+            }
+        })?;
 
     Ok(QuickReviewReport {
         review: response.text,
@@ -189,11 +181,11 @@ fn enforce_prompt_token_budget(prompt: &str, limit: u64) -> Result<(), QuickRevi
     Ok(())
 }
 
-async fn discover_quick_review_catalog(
+fn discover_quick_review_catalog(
     client: &mut NativeClient,
     on_progress: Option<&(dyn Fn(&str) + Sync)>,
 ) -> (Vec<NativeModelConfig>, NativeTeamSettings) {
-    let models = match client.get_cli_model_configs().await {
+    let models = match client.get_cli_model_configs() {
         Ok(models) => {
             progress(
                 on_progress,
@@ -212,7 +204,7 @@ async fn discover_quick_review_catalog(
             return (Vec::new(), NativeTeamSettings::default());
         }
     };
-    let team_settings = match client.get_cli_team_settings().await {
+    let team_settings = match client.get_cli_team_settings() {
         Ok(settings) => {
             progress(
                 on_progress,

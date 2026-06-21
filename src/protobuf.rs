@@ -9,6 +9,7 @@ pub enum WireType {
     Fixed64,
     LengthDelimited,
     Fixed32,
+    #[allow(dead_code)]
     Unknown(u64),
 }
 
@@ -213,6 +214,7 @@ pub fn field_varint(field: &Field<'_>) -> Option<u64> {
     }
 }
 
+#[allow(dead_code)]
 pub fn field_fixed64_f64(field: &Field<'_>) -> Option<f64> {
     match field.value {
         FieldValue::Fixed64(bytes) => Some(f64::from_le_bytes(bytes)),
